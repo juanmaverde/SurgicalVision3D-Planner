@@ -882,15 +882,12 @@
        </property>
       </widget>
      </item>
-     <item row="1" column="1">
-      <widget class="QComboBox" name="cohortExecutionModeComboBox">
-       <property name="SlicerParameterName" stdset="0">
-        <string>cohortExecutionMode</string>
-       </property>
-       <item>
-        <property name="text">
-         <string>ScenarioRegistry</string>
-        </property>
+      <item row="1" column="1">
+       <widget class="QComboBox" name="cohortExecutionModeComboBox">
+        <item>
+         <property name="text">
+          <string>ScenarioRegistry</string>
+         </property>
        </item>
        <item>
         <property name="text">
@@ -1072,15 +1069,12 @@
        </property>
       </widget>
      </item>
-     <item row="0" column="1">
-      <widget class="QComboBox" name="exportModeComboBox">
-       <property name="SlicerParameterName" stdset="0">
-        <string>exportMode</string>
-       </property>
-       <item>
-        <property name="text">
-         <string>CurrentWorkingPlan</string>
-        </property>
+      <item row="0" column="1">
+       <widget class="QComboBox" name="exportModeComboBox">
+        <item>
+         <property name="text">
+          <string>CurrentWorkingPlan</string>
+         </property>
        </item>
        <item>
         <property name="text">

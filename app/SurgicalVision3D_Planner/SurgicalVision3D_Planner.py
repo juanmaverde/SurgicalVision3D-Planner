@@ -380,6 +380,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         self.layout.addWidget(uiWidget)
         self.ui = slicer.util.childWidgetVariables(uiWidget)
         uiWidget.setMRMLScene(slicer.mrmlScene)
+        self._configureTooltips()
 
         for selectorName in (
             "probeSegmentationSelector",
@@ -417,8 +418,96 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             "currentNodeChanged(vtkMRMLNode*)",
             self.onRiskStructuresSegmentationChanged,
         )
+        if hasattr(self.ui, "cohortStudyDefinitionPathLineEdit"):
+            self.ui.cohortStudyDefinitionPathLineEdit.connect("textChanged(QString)", self._updateButtonStates)
+        if hasattr(self.ui, "cohortExecutionModeComboBox"):
+            self.ui.cohortExecutionModeComboBox.connect("currentIndexChanged(int)", self._updateButtonStates)
+        if hasattr(self.ui, "exportModeComboBox"):
+            self.ui.exportModeComboBox.connect("currentIndexChanged(int)", self._updateButtonStates)
+        if hasattr(self.ui, "selectedExportScenarioIDLineEdit"):
+            self.ui.selectedExportScenarioIDLineEdit.connect("textChanged(QString)", self._updateButtonStates)
+        if hasattr(self.ui, "exportBaseNameLineEdit"):
+            self.ui.exportBaseNameLineEdit.connect("textChanged(QString)", self._updateButtonStates)
 
         self.initializeParameterNode()
+
+    def _configureTooltips(self) -> None:
+        tooltipsByWidgetName: dict[str, str] = {
+            # Core inputs
+            "probeSegmentationSelector": (
+                "Select the reference probe/applicator template segmentation. This source geometry is duplicated and "
+                "placed on each trajectory during 'Place Probes'. The template is expected to be oriented along local -Z."
+            ),
+            "endpointsMarkupsSelector": (
+                "Select trajectory endpoints as ordered entry/target pairs with an even number of control points: "
+                "entry1,target1,entry2,target2,..."
+            ),
+            "tumorSegmentationSelector": (
+                "Select the tumor/target segmentation used for margin evaluation, coverage context, and no-touch checks."
+            ),
+            "riskStructuresSegmentationSelector": (
+                "Optional: select structures-at-risk segmentation. If provided, distance-based safety summary tables are generated."
+            ),
+            "nativeFiducialsSelector": "Fiducials in native image space for rigid registration.",
+            "registeredFiducialsSelector": "Fiducials in registered target space for rigid registration.",
+            "createTrajectoryLinesOnPlacementCheckBox": "If enabled, trajectory lines are generated automatically after placing probes.",
+            "clearPreviousGeneratedProbesCheckBox": "If enabled, previous generated probes/lines and owned derived outputs are cleared before placement.",
+            # Workflow actions
+            "placeProbesButton": "Place probe instances along each endpoint-pair trajectory.",
+            "createTrajectoryLinesButton": "Create or refresh line markups from endpoint pairs.",
+            "mergeTranslatedProbesButton": "Merge generated probe instances into one combined ablation segmentation.",
+            "registerTumorButton": "Compute rigid transform from native to registered fiducials and apply it to the tumor segmentation.",
+            "hardenTumorTransformButton": "Permanently harden the current tumor transform into the segmentation geometry.",
+            "evaluateMarginsButton": "Run signed-margin analysis between tumor and ablation zone and refresh summary tables.",
+            "recolorMarginsButton": "Recolor signed-distance values using the three configurable thresholds below.",
+            "resetMarginColorsButton": "Restore original signed-distance values and default coloring on the margin model.",
+            # Probe coordination
+            "minInterProbeDistanceSpinBox": "Minimum allowed distance (mm) between probe trajectory line segments.",
+            "maxInterProbeDistanceSpinBox": "Maximum allowed distance (mm) between probe trajectory line segments.",
+            "minEntryPointSpacingSpinBox": "Minimum allowed spacing (mm) between probe entry points.",
+            "minTargetPointSpacingSpinBox": "Minimum allowed spacing (mm) between probe target points.",
+            "maxParallelAngleSpinBox": "Maximum angle (degrees) considered too-parallel when the angle rule is enabled.",
+            "maxOverlapRedundancySpinBox": "Maximum allowed overlap redundancy percent for conservative overlap gating.",
+            "requireAllProbePairsFeasibleCheckBox": "If enabled, any infeasible probe pair makes the coordination gate fail.",
+            "enableNoTouchCheckBox": "If enabled, run conservative no-touch rule: all entry points must be outside tumor.",
+            "enableInterProbeDistanceRuleCheckBox": "Enable/disable inter-probe distance constraints.",
+            "enableEntrySpacingRuleCheckBox": "Enable/disable minimum entry-point spacing constraint.",
+            "enableTargetSpacingRuleCheckBox": "Enable/disable minimum target-point spacing constraint.",
+            "enableAngleRuleCheckBox": "Enable/disable near-parallel probe axis angle constraint.",
+            "enableOverlapRuleCheckBox": "Enable/disable conservative overlap redundancy constraint.",
+            "evaluateProbeCoordinationButton": "Evaluate pairwise probe coordination and plan-level gate status.",
+            # Cohort/study
+            "cohortStudyDefinitionPathLineEdit": "Path to cohort JSON definition (relative paths are resolved from the module folder).",
+            "cohortExecutionModeComboBox": "Execution mode for cohort cases (scenario-driven or current working-plan context).",
+            "cohortIncludeMarginMetricsCheckBox": "Include signed-margin metrics in case-level and aggregate cohort outputs.",
+            "cohortIncludeSafetyMetricsCheckBox": "Include structures-at-risk safety metrics in cohort outputs.",
+            "cohortIncludeCoverageMetricsCheckBox": "Include coverage metrics in cohort outputs when available.",
+            "cohortIncludeFeasibilityMetricsCheckBox": "Include feasibility pass/fail metrics in cohort outputs.",
+            "cohortIncludeCoordinationMetricsCheckBox": "Include probe-coordination gate metrics in cohort outputs.",
+            "cohortIncludeVerificationMetricsCheckBox": "Include planned-vs-actual verification metrics in cohort outputs when present.",
+            "cohortIncludeRecommendationMetricsCheckBox": "Include recommendation/composite-score context in cohort outputs.",
+            "cohortMaxCasesSpinBox": "Maximum number of cohort cases to execute (0 runs all listed cases).",
+            "runCohortEvaluationButton": "Run deterministic cohort batch evaluation and update cohort summary tables.",
+            # Export
+            "exportModeComboBox": "Choose export scope: current plan, selected scenario, or recommendation context.",
+            "selectedExportScenarioIDLineEdit": "Scenario ID used when export mode is SelectedScenario.",
+            "exportBaseNameLineEdit": "Base name for exported bundle folder. A deterministic sequence suffix is added.",
+            "exportDirectoryLineEdit": "Destination directory for export bundles. Leave empty to use default temp/export location.",
+            "includeWorkingPlanCheckBox": "Include current working-plan summary outputs in export.",
+            "includeSelectedScenarioCheckBox": "Include selected scenario summary payload in export when available.",
+            "includeScenarioComparisonCheckBox": "Include scenario comparison/delta/frontier tables when present.",
+            "includeRecommendationOutputsCheckBox": "Include recommendation summary outputs when present.",
+            "includeTrajectoryTablesCheckBox": "Include trajectory summary tables in export.",
+            "includeSafetyTablesCheckBox": "Include safety distance summary tables in export.",
+            "includeCoverageTablesCheckBox": "Include coverage summary tables in export when present.",
+            "includeFeasibilityTablesCheckBox": "Include feasibility and gating tables in export when present.",
+            "includeCoordinationTablesCheckBox": "Include probe coordination and no-touch tables in export.",
+            "exportBundleButton": "Write a deterministic export bundle (JSON + CSV + manifest) without mutating the plan.",
+        }
+        for widgetName, tooltipText in tooltipsByWidgetName.items():
+            widget = getattr(self.ui, widgetName, None)
+            if widget and hasattr(widget, "setToolTip"):
+                widget.setToolTip(tooltipText)
 
     def cleanup(self) -> None:
         self.removeObservers()

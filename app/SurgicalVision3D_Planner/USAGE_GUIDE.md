@@ -294,3 +294,99 @@ Only available outputs are exported.
 - Use clear naming for markups/segmentations for auditability.
 - Re-run unchanged workflows to verify reproducibility.
 - When sharing results, include both bundle manifest and key source tables.
+
+## 12. Full GUI Parameter Reference (All Bound Parameters)
+
+This section documents every GUI-bound persisted parameter (`SlicerParameterName`) in the module.
+These values are stored in the module parameter node and restored with the scene.
+
+### 12.1 Inputs, registration, and margin-display parameters
+
+| Parameter key | UI control | What it controls | Expected value / example |
+|---|---|---|---|
+| `referenceProbeSegmentation` | `probeSegmentationSelector` | Source probe/applicator template geometry used for placement. | Segmentation node with a valid closed-surface segment. |
+| `endpointsMarkups` | `endpointsMarkupsSelector` | Entry/target fiducial list used to define trajectories. | Markups fiducial node with even number of points. |
+| `createTrajectoryLinesOnPlacement` | `createTrajectoryLinesOnPlacementCheckBox` | Auto-create line markups after probe placement. | `true` or `false`. |
+| `clearPreviousGeneratedProbes` | `clearPreviousGeneratedProbesCheckBox` | Clear prior generated probes/lines before new placement. | `true` or `false`. |
+| `tumorSegmentation` | `tumorSegmentationSelector` | Target/tumor segmentation used in evaluation. | Segmentation node with at least one valid target segment. |
+| `nativeFiducials` | `nativeFiducialsSelector` | Native-space fiducials for rigid registration. | Markups fiducial node. |
+| `registeredFiducials` | `registeredFiducialsSelector` | Target-space fiducials for rigid registration. | Markups fiducial node. |
+| `tumorTransform` | `tumorTransformSelector` | Optional explicit transform reference used by registration/harden steps. | Transform node. |
+| `combinedProbeSegmentation` | `combinedProbeSegmentationSelector` | Output combined ablation segmentation reference. | Module-owned segmentation node (`SV3D Combined Ablation Zone`). |
+| `outputMarginModel` | `outputMarginModelSelector` | Output signed-margin model reference. | Module-owned model node (`SV3D Signed Margin Model`). |
+| `resultTable` | `resultTableSelector` | Output raw signed-margin table reference. | Module-owned table node (`SV3D Signed Margin Table`). |
+| `riskStructuresSegmentation` | `riskStructuresSegmentationSelector` | Optional segmentation of structures-at-risk for safety metrics. | Segmentation node with one or more risk segments. |
+| `recolorThresholdLow` | `recolorThresholdLowSpinBox` | Low threshold for margin recolor bucketization. | mm value, e.g. `-10.0`. |
+| `recolorThresholdMid` | `recolorThresholdMidSpinBox` | Mid threshold for margin recolor bucketization. | mm value, e.g. `-5.0`. |
+| `recolorThresholdHigh` | `recolorThresholdHighSpinBox` | High threshold for margin recolor bucketization. | mm value, e.g. `-2.0`. |
+
+### 12.2 Probe coordination parameters
+
+| Parameter key | UI control | What it controls | Expected value / example |
+|---|---|---|---|
+| `minInterProbeDistanceMm` | `minInterProbeDistanceSpinBox` | Minimum allowed distance between trajectory centerline segments. | mm value, e.g. `5.0`. |
+| `maxInterProbeDistanceMm` | `maxInterProbeDistanceSpinBox` | Maximum allowed distance between trajectory centerline segments. | mm value, e.g. `120.0`. |
+| `minEntryPointSpacingMm` | `minEntryPointSpacingSpinBox` | Minimum spacing between probe entry points. | mm value, e.g. `5.0`. |
+| `minTargetPointSpacingMm` | `minTargetPointSpacingSpinBox` | Minimum spacing between probe target points. | mm value, e.g. `3.0`. |
+| `maxParallelAngleDeg` | `maxParallelAngleSpinBox` | Angle threshold for near-parallel rule. | degree value, e.g. `10.0`. |
+| `maxAllowedOverlapPercentBetweenPerProbeVolumes` | `maxOverlapRedundancySpinBox` | Conservative overlap redundancy cap between probe volumes. | percent value, e.g. `80.0`. |
+| `requireAllProbePairsFeasible` | `requireAllProbePairsFeasibleCheckBox` | If enabled, any failed pair fails plan-level coordination gate. | `true` or `false`. |
+| `enableNoTouchCheck` | `enableNoTouchCheckBox` | Enables no-touch entry rule (entry points outside tumor). | `true` or `false`. |
+| `enableInterProbeDistanceRule` | `enableInterProbeDistanceRuleCheckBox` | Enables min/max inter-probe distance rule. | `true` or `false`. |
+| `enableEntrySpacingRule` | `enableEntrySpacingRuleCheckBox` | Enables minimum entry-point spacing rule. | `true` or `false`. |
+| `enableTargetSpacingRule` | `enableTargetSpacingRuleCheckBox` | Enables minimum target-point spacing rule. | `true` or `false`. |
+| `enableAngleRule` | `enableAngleRuleCheckBox` | Enables near-parallel angle rule. | `true` or `false`. |
+| `enableOverlapRule` | `enableOverlapRuleCheckBox` | Enables overlap-redundancy rule. | `true` or `false`. |
+
+### 12.3 Cohort/study evaluation parameters
+
+| Parameter key | UI control | What it controls | Expected value / example |
+|---|---|---|---|
+| `cohortStudyDefinitionPath` | `cohortStudyDefinitionPathLineEdit` | Path to cohort definition JSON. | Relative path like `Resources/Cohorts/studies/example_cohort_v1.json` or absolute path. |
+| `cohortExecutionMode` | `cohortExecutionModeComboBox` | Source mode for case execution. | `ScenarioRegistry` or `CurrentWorkingPlan`. |
+| `cohortIncludeMarginMetrics` | `cohortIncludeMarginMetricsCheckBox` | Include margin metrics in cohort output rows. | `true` or `false`. |
+| `cohortIncludeSafetyMetrics` | `cohortIncludeSafetyMetricsCheckBox` | Include safety metrics in cohort outputs. | `true` or `false`. |
+| `cohortIncludeCoverageMetrics` | `cohortIncludeCoverageMetricsCheckBox` | Include coverage metrics in cohort outputs. | `true` or `false`. |
+| `cohortIncludeFeasibilityMetrics` | `cohortIncludeFeasibilityMetricsCheckBox` | Include feasibility/gate metrics in cohort outputs. | `true` or `false`. |
+| `cohortIncludeCoordinationMetrics` | `cohortIncludeCoordinationMetricsCheckBox` | Include coordination/no-touch metrics in cohort outputs. | `true` or `false`. |
+| `cohortIncludeVerificationMetrics` | `cohortIncludeVerificationMetricsCheckBox` | Include planned-vs-actual verification metrics when available. | `true` or `false`. |
+| `cohortIncludeRecommendationMetrics` | `cohortIncludeRecommendationMetricsCheckBox` | Include recommendation/composite-score metrics. | `true` or `false`. |
+| `cohortMaxCases` | `cohortMaxCasesSpinBox` | Maximum number of cases to execute from cohort list. | Integer (`0` means all). |
+
+### 12.4 Reproducibility package parameters
+
+| Parameter key | UI control | What it controls | Expected value / example |
+|---|---|---|---|
+| `packageMode` | `packageModeComboBox` | Reproducibility package scope profile. | `ReviewerSupplement`, `ValidationArchive`, `InternalHandoff`. |
+| `includeBenchmarkArtifacts` | `includeBenchmarkArtifactsCheckBox` | Include benchmark definitions and benchmark runtime tables when present. | `true` or `false`. |
+| `includeScenarioRegistry` | `includeScenarioRegistryCheckBox` | Include scenario registry/recommendation provenance artifacts. | `true` or `false`. |
+| `includeCohortStudyArtifacts` | `includeCohortStudyArtifactsCheckBox` | Include cohort resources and cohort outputs. | `true` or `false`. |
+| `includeStudyAnalytics` | `includeStudyAnalyticsCheckBox` | Include study-analytics tables if available in-scene. | `true` or `false`. |
+| `includeReports` | `includeReportsCheckBox` | Include report-oriented outputs when available. | `true` or `false`. |
+| `includeCanonicalJson` | `includeCanonicalJsonCheckBox` | Include canonical machine-readable JSON summaries. | `true` or `false`. |
+| `includeValidationResults` | `includeValidationResultsCheckBox` | Include validation/benchmark result tables when available. | `true` or `false`. |
+| `packageBaseName` | `packageBaseNameLineEdit` | Root package name before sequence suffix. | Text, e.g. `SV3D_ReproducibilityPackage`. |
+| `packageOutputDirectory` | `packageOutputDirectoryLineEdit` | Output folder for reproducibility packages. | Empty for default temp path or absolute directory path. |
+
+### 12.5 Export parameters
+
+| Parameter key | UI control | What it controls | Expected value / example |
+|---|---|---|---|
+| `exportMode` | `exportModeComboBox` | Export context selection. | `CurrentWorkingPlan`, `SelectedScenario`, `CurrentRecommendationContext`. |
+| `selectedExportScenarioID` | `selectedExportScenarioIDLineEdit` | Scenario ID used when scenario-specific export mode is selected. | Scenario ID string, e.g. `S002`. |
+| `exportBaseName` | `exportBaseNameLineEdit` | Export bundle base folder name before sequence suffix. | Text, e.g. `SV3D_Export`. |
+| `lastExportDirectory` | `exportDirectoryLineEdit` | Export root directory for bundles. | Empty for default temp path or absolute directory path. |
+| `includeWorkingPlan` | `includeWorkingPlanCheckBox` | Include current working-plan tables/summary. | `true` or `false`. |
+| `includeSelectedScenario` | `includeSelectedScenarioCheckBox` | Include selected scenario summary payload if available. | `true` or `false`. |
+| `includeScenarioComparison` | `includeScenarioComparisonCheckBox` | Include scenario comparison/delta/frontier tables when present. | `true` or `false`. |
+| `includeRecommendationOutputs` | `includeRecommendationOutputsCheckBox` | Include recommendation outputs when present. | `true` or `false`. |
+| `includeTrajectoryTables` | `includeTrajectoryTablesCheckBox` | Include trajectory-related tables. | `true` or `false`. |
+| `includeSafetyTables` | `includeSafetyTablesCheckBox` | Include structure safety tables. | `true` or `false`. |
+| `includeCoverageTables` | `includeCoverageTablesCheckBox` | Include coverage-related tables. | `true` or `false`. |
+| `includeFeasibilityTables` | `includeFeasibilityTablesCheckBox` | Include feasibility and gating tables. | `true` or `false`. |
+| `includeCoordinationTables` | `includeCoordinationTablesCheckBox` | Include probe-coordination/no-touch tables. | `true` or `false`. |
+
+## 13. Tooltip Coverage Guarantee
+
+All GUI-bound parameters listed in Section 12 now have explicit explanatory tooltip text in the module widget setup.
+Tooltips are assigned during module setup and remain active for normal runtime usage.

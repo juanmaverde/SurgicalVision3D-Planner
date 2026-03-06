@@ -1,0 +1,12 @@
+{
+  "catalogName": "SV3D Cohort Catalog",
+  "catalogVersion": "1.0",
+  "studies": [
+    {
+      "studyId": "example_cohort_v1",
+      "displayName": "Example Cohort v1",
+      "path": "Resources/Cohorts/studies/example_cohort_v1.json",
+      "description": "Minimal deterministic cohort definition for batch-evaluation workflow smoke testing."
+    }
+  ]
+}

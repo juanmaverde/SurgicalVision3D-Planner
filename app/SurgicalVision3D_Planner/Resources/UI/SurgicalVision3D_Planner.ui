@@ -853,6 +853,213 @@
    </widget>
   </item>
   <item>
+   <widget class="ctkCollapsibleButton" name="cohortCollapsibleButton">
+    <property name="text">
+     <string>Cohort / Study Evaluation</string>
+    </property>
+    <layout class="QFormLayout" name="cohortFormLayout">
+     <item row="0" column="0">
+      <widget class="QLabel" name="cohortStudyDefinitionPathLabel">
+       <property name="text">
+        <string>Cohort definition path:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="0" column="1">
+      <widget class="QLineEdit" name="cohortStudyDefinitionPathLineEdit">
+       <property name="text">
+        <string>Resources/Cohorts/studies/example_cohort_v1.json</string>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>cohortStudyDefinitionPath</string>
+       </property>
+      </widget>
+     </item>
+     <item row="1" column="0">
+      <widget class="QLabel" name="cohortExecutionModeLabel">
+       <property name="text">
+        <string>Execution mode:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="1" column="1">
+      <widget class="QComboBox" name="cohortExecutionModeComboBox">
+       <property name="SlicerParameterName" stdset="0">
+        <string>cohortExecutionMode</string>
+       </property>
+       <item>
+        <property name="text">
+         <string>ScenarioRegistry</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>CurrentWorkingPlan</string>
+        </property>
+       </item>
+      </widget>
+     </item>
+     <item row="2" column="0">
+      <widget class="QLabel" name="cohortIncludeMarginMetricsLabel">
+       <property name="text">
+        <string>Include margin metrics:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="2" column="1">
+      <widget class="QCheckBox" name="cohortIncludeMarginMetricsCheckBox">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>cohortIncludeMarginMetrics</string>
+       </property>
+      </widget>
+     </item>
+     <item row="3" column="0">
+      <widget class="QLabel" name="cohortIncludeSafetyMetricsLabel">
+       <property name="text">
+        <string>Include safety metrics:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="3" column="1">
+      <widget class="QCheckBox" name="cohortIncludeSafetyMetricsCheckBox">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>cohortIncludeSafetyMetrics</string>
+       </property>
+      </widget>
+     </item>
+     <item row="4" column="0">
+      <widget class="QLabel" name="cohortIncludeCoverageMetricsLabel">
+       <property name="text">
+        <string>Include coverage metrics:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="4" column="1">
+      <widget class="QCheckBox" name="cohortIncludeCoverageMetricsCheckBox">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>cohortIncludeCoverageMetrics</string>
+       </property>
+      </widget>
+     </item>
+     <item row="5" column="0">
+      <widget class="QLabel" name="cohortIncludeFeasibilityMetricsLabel">
+       <property name="text">
+        <string>Include feasibility metrics:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="5" column="1">
+      <widget class="QCheckBox" name="cohortIncludeFeasibilityMetricsCheckBox">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>cohortIncludeFeasibilityMetrics</string>
+       </property>
+      </widget>
+     </item>
+     <item row="6" column="0">
+      <widget class="QLabel" name="cohortIncludeCoordinationMetricsLabel">
+       <property name="text">
+        <string>Include coordination metrics:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="6" column="1">
+      <widget class="QCheckBox" name="cohortIncludeCoordinationMetricsCheckBox">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>cohortIncludeCoordinationMetrics</string>
+       </property>
+      </widget>
+     </item>
+     <item row="7" column="0">
+      <widget class="QLabel" name="cohortIncludeVerificationMetricsLabel">
+       <property name="text">
+        <string>Include verification metrics:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="7" column="1">
+      <widget class="QCheckBox" name="cohortIncludeVerificationMetricsCheckBox">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>cohortIncludeVerificationMetrics</string>
+       </property>
+      </widget>
+     </item>
+     <item row="8" column="0">
+      <widget class="QLabel" name="cohortIncludeRecommendationMetricsLabel">
+       <property name="text">
+        <string>Include recommendation metrics:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="8" column="1">
+      <widget class="QCheckBox" name="cohortIncludeRecommendationMetricsCheckBox">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>cohortIncludeRecommendationMetrics</string>
+       </property>
+      </widget>
+     </item>
+     <item row="9" column="0">
+      <widget class="QLabel" name="cohortMaxCasesLabel">
+       <property name="text">
+        <string>Max cases (0 = all):</string>
+       </property>
+      </widget>
+     </item>
+     <item row="9" column="1">
+      <widget class="QSpinBox" name="cohortMaxCasesSpinBox">
+       <property name="maximum">
+        <number>100000</number>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>cohortMaxCases</string>
+       </property>
+      </widget>
+     </item>
+     <item row="10" column="0" colspan="2">
+      <layout class="QHBoxLayout" name="cohortControlsLayout">
+       <item>
+        <widget class="QPushButton" name="runCohortEvaluationButton">
+         <property name="enabled">
+          <bool>true</bool>
+         </property>
+         <property name="text">
+          <string>Run Cohort Evaluation</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="cohortStatusLabel">
+         <property name="text">
+          <string>Cohort evaluation not run.</string>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </item>
+    </layout>
+   </widget>
+  </item>
+  <item>
    <widget class="ctkCollapsibleButton" name="exportCollapsibleButton">
     <property name="text">
      <string>Export</string>

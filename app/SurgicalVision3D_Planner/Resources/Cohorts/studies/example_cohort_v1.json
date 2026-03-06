@@ -1,0 +1,18 @@
+{
+  "schemaName": "SV3D.CohortStudyDefinition",
+  "schemaVersion": "1.0",
+  "studyId": "example_cohort_v1",
+  "displayName": "Example Cohort v1",
+  "description": "Single-case deterministic cohort starter using the current working plan context.",
+  "cases": [
+    {
+      "caseId": "CURRENT_PLAN_001",
+      "displayName": "Current Working Plan",
+      "inputReference": "CurrentWorkingPlan",
+      "scenarioId": "",
+      "presetId": "",
+      "targetSegmentId": "",
+      "notes": "Uses currently available in-scene summary tables."
+    }
+  ]
+}

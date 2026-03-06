@@ -4,7 +4,7 @@ import csv
 import json
 import logging
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
@@ -49,6 +49,10 @@ GENERATED_PROBE_COORDINATION_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner
 GENERATED_NO_TOUCH_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedNoTouchSummaryTable"
 GENERATED_EXPORT_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedExportSummaryTable"
 GENERATED_EXPORT_MANIFEST_PREVIEW_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedExportManifestPreviewTable"
+GENERATED_COHORT_EXECUTION_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedCohortExecutionSummaryTable"
+GENERATED_COHORT_CASE_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedCohortCaseSummaryTable"
+GENERATED_COHORT_AGGREGATE_METRICS_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedCohortAggregateMetricsTable"
+GENERATED_COHORT_COMPARISON_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedCohortComparisonSummaryTable"
 TEMP_PROBE_MARGIN_INPUT_ATTRIBUTE = "SurgicalVision3D_Planner.TempProbeMarginInput"
 TEMP_TUMOR_MARGIN_INPUT_ATTRIBUTE = "SurgicalVision3D_Planner.TempTumorMarginInput"
 TEMP_PROBE_SAFETY_INPUT_ATTRIBUTE = "SurgicalVision3D_Planner.TempProbeSafetyInput"
@@ -73,6 +77,10 @@ PROBE_COORDINATION_SUMMARY_TABLE_NODE_NAME = "SV3D Probe Coordination Summary"
 NO_TOUCH_SUMMARY_TABLE_NODE_NAME = "SV3D NoTouch Summary"
 EXPORT_SUMMARY_TABLE_NODE_NAME = "SV3D Export Summary"
 EXPORT_MANIFEST_PREVIEW_TABLE_NODE_NAME = "SV3D Export Manifest Preview"
+COHORT_EXECUTION_SUMMARY_TABLE_NODE_NAME = "SV3D Cohort Execution Summary"
+COHORT_CASE_SUMMARY_TABLE_NODE_NAME = "SV3D Cohort Case Summary"
+COHORT_AGGREGATE_METRICS_TABLE_NODE_NAME = "SV3D Cohort Aggregate Metrics"
+COHORT_COMPARISON_SUMMARY_TABLE_NODE_NAME = "SV3D Cohort Comparison Summary"
 TEMP_PROBE_SAFETY_MODEL_NODE_NAME = "SV3D Temp Probe Safety Input"
 TEMP_STRUCTURE_SAFETY_MODEL_NODE_NAME = "SV3D Temp Structure Safety Input"
 TEMP_STRUCTURE_SAFETY_DISTANCE_MODEL_NODE_NAME = "SV3D Temp Structure Safety Distance"
@@ -194,6 +202,52 @@ class PlanExportManifest:
     notes: str = ""
 
 
+@dataclass
+class CohortCaseMember:
+    caseId: str
+    displayName: str
+    inputReference: str = "ScenarioID"
+    scenarioId: str = ""
+    presetId: str = ""
+    targetSegmentId: str = ""
+    notes: str = ""
+
+
+@dataclass
+class CohortStudyDefinition:
+    studyId: str
+    displayName: str = ""
+    description: str = ""
+    cases: list[CohortCaseMember] = field(default_factory=list)
+
+
+@dataclass
+class CohortExecutionConfig:
+    studyDefinitionPath: str = ""
+    executionMode: str = "ScenarioRegistry"
+    includeMarginMetrics: bool = True
+    includeSafetyMetrics: bool = True
+    includeCoverageMetrics: bool = True
+    includeFeasibilityMetrics: bool = True
+    includeCoordinationMetrics: bool = True
+    includeVerificationMetrics: bool = True
+    includeRecommendationMetrics: bool = True
+    maxCases: int = 0
+
+
+@dataclass
+class CohortCaseResult:
+    caseId: str
+    displayName: str
+    inputReference: str
+    scenarioId: str
+    executionStatus: str
+    statusMessage: str
+    presetId: str = ""
+    targetSegmentId: str = ""
+    metricValues: dict[str, Any] = field(default_factory=dict)
+
+
 #
 # SurgicalVision3D_Planner
 #
@@ -250,6 +304,10 @@ class SurgicalVision3D_PlannerParameterNode:
     noTouchSummaryTable: vtkMRMLTableNode | None = None
     exportSummaryTable: vtkMRMLTableNode | None = None
     exportManifestPreviewTable: vtkMRMLTableNode | None = None
+    cohortExecutionSummaryTable: vtkMRMLTableNode | None = None
+    cohortCaseSummaryTable: vtkMRMLTableNode | None = None
+    cohortAggregateMetricsTable: vtkMRMLTableNode | None = None
+    cohortComparisonSummaryTable: vtkMRMLTableNode | None = None
 
     createTrajectoryLinesOnPlacement: bool = True
     clearPreviousGeneratedProbes: bool = True
@@ -283,6 +341,16 @@ class SurgicalVision3D_PlannerParameterNode:
     includeCoverageTables: bool = True
     includeFeasibilityTables: bool = True
     includeCoordinationTables: bool = True
+    cohortStudyDefinitionPath: str = "Resources/Cohorts/studies/example_cohort_v1.json"
+    cohortExecutionMode: str = "ScenarioRegistry"
+    cohortIncludeMarginMetrics: bool = True
+    cohortIncludeSafetyMetrics: bool = True
+    cohortIncludeCoverageMetrics: bool = True
+    cohortIncludeFeasibilityMetrics: bool = True
+    cohortIncludeCoordinationMetrics: bool = True
+    cohortIncludeVerificationMetrics: bool = True
+    cohortIncludeRecommendationMetrics: bool = True
+    cohortMaxCases: int = 0
 
     generatedProbeNodeIDs: str = "[]"
     generatedTrajectoryLineIDs: str = "[]"
@@ -343,6 +411,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         self.ui.recolorMarginsButton.connect("clicked(bool)", self.onRecolorMarginsButton)
         self.ui.resetMarginColorsButton.connect("clicked(bool)", self.onResetMarginColorsButton)
         self.ui.evaluateProbeCoordinationButton.connect("clicked(bool)", self.onEvaluateProbeCoordinationButton)
+        self.ui.runCohortEvaluationButton.connect("clicked(bool)", self.onRunCohortEvaluationButton)
         self.ui.exportBundleButton.connect("clicked(bool)", self.onExportBundleButton)
         self.ui.riskStructuresSegmentationSelector.connect(
             "currentNodeChanged(vtkMRMLNode*)",
@@ -388,6 +457,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self._parameterNodeGuiTag = self._parameterNode.connectGui(self.ui)
             self.addObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._updateButtonStates)
             self._syncExportWidgetsFromParameterNode()
+            self._syncCohortWidgetsFromParameterNode()
             self._updateButtonStates()
 
     def _syncExportWidgetsFromParameterNode(self) -> None:
@@ -405,6 +475,18 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self.ui.exportBaseNameLineEdit.text = str(self._parameterNode.exportBaseName or "")
         if hasattr(self.ui, "exportDirectoryLineEdit"):
             self.ui.exportDirectoryLineEdit.text = str(self._parameterNode.lastExportDirectory or "")
+
+    def _syncCohortWidgetsFromParameterNode(self) -> None:
+        if not self._parameterNode:
+            return
+
+        if hasattr(self.ui, "cohortStudyDefinitionPathLineEdit"):
+            self.ui.cohortStudyDefinitionPathLineEdit.text = str(self._parameterNode.cohortStudyDefinitionPath or "")
+        if hasattr(self.ui, "cohortExecutionModeComboBox"):
+            currentModeText = str(self._parameterNode.cohortExecutionMode or "ScenarioRegistry")
+            modeIndex = self.ui.cohortExecutionModeComboBox.findText(currentModeText)
+            if modeIndex >= 0:
+                self.ui.cohortExecutionModeComboBox.currentIndex = modeIndex
 
     def _reconcileParameterNodeState(self) -> None:
         if not self.logic or not self._parameterNode:
@@ -436,6 +518,10 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             "noTouchSummaryTable",
             "exportSummaryTable",
             "exportManifestPreviewTable",
+            "cohortExecutionSummaryTable",
+            "cohortCaseSummaryTable",
+            "cohortAggregateMetricsTable",
+            "cohortComparisonSummaryTable",
         ):
             node = getattr(self._parameterNode, nodeFieldName)
             if node and not slicer.mrmlScene.IsNodePresent(node):
@@ -500,6 +586,33 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         if clearReferences and hasattr(self.ui, "exportStatusLabel"):
             self.ui.exportStatusLabel.text = "No export run yet."
 
+    def _clearOwnedCohortOutputs(self, clearReferences: bool = False) -> None:
+        if not self.logic or not self._parameterNode:
+            return
+
+        if self.logic.removeNodeIfOwned(
+            self._parameterNode.cohortExecutionSummaryTable,
+            GENERATED_COHORT_EXECUTION_SUMMARY_TABLE_ATTRIBUTE,
+        ) or clearReferences:
+            self._parameterNode.cohortExecutionSummaryTable = None
+        if self.logic.removeNodeIfOwned(
+            self._parameterNode.cohortCaseSummaryTable,
+            GENERATED_COHORT_CASE_SUMMARY_TABLE_ATTRIBUTE,
+        ) or clearReferences:
+            self._parameterNode.cohortCaseSummaryTable = None
+        if self.logic.removeNodeIfOwned(
+            self._parameterNode.cohortAggregateMetricsTable,
+            GENERATED_COHORT_AGGREGATE_METRICS_TABLE_ATTRIBUTE,
+        ) or clearReferences:
+            self._parameterNode.cohortAggregateMetricsTable = None
+        if self.logic.removeNodeIfOwned(
+            self._parameterNode.cohortComparisonSummaryTable,
+            GENERATED_COHORT_COMPARISON_SUMMARY_TABLE_ATTRIBUTE,
+        ) or clearReferences:
+            self._parameterNode.cohortComparisonSummaryTable = None
+        if clearReferences and hasattr(self.ui, "cohortStatusLabel"):
+            self.ui.cohortStatusLabel.text = "Cohort evaluation not run."
+
     def _clearOwnedDerivedOutputs(self, clearReferences: bool = False) -> None:
         if not self.logic or not self._parameterNode:
             return
@@ -524,6 +637,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self._parameterNode.marginThresholdSummaryTable = None
         self._clearOwnedSafetyOutputs(clearReferences=clearReferences)
         self._clearOwnedCoordinationOutputs(clearReferences=clearReferences)
+        self._clearOwnedCohortOutputs(clearReferences=clearReferences)
 
     def _updateButtonStates(self, caller=None, event=None) -> None:
         if not self._parameterNode:
@@ -537,6 +651,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 "recolorMarginsButton",
                 "resetMarginColorsButton",
                 "evaluateProbeCoordinationButton",
+                "runCohortEvaluationButton",
                 "exportBundleButton",
             ):
                 getattr(self.ui, buttonName).enabled = False
@@ -576,7 +691,13 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             if hasattr(self.ui, "exportBaseNameLineEdit")
             else str(self._parameterNode.exportBaseName)
         )
+        cohortStudyDefinitionPath = (
+            str(self.ui.cohortStudyDefinitionPathLineEdit.text)
+            if hasattr(self.ui, "cohortStudyDefinitionPathLineEdit")
+            else str(self._parameterNode.cohortStudyDefinitionPath)
+        )
         self.ui.exportBundleButton.enabled = bool(exportBaseName.strip()) and (not scenarioRequired or bool(selectedScenarioID.strip()))
+        self.ui.runCohortEvaluationButton.enabled = bool(cohortStudyDefinitionPath.strip())
 
     def onPlaceProbesButton(self) -> None:
         with slicer.util.tryWithErrorDisplay(_("Failed to place probes."), waitCursor=True):
@@ -926,6 +1047,106 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self.logic.resetMarginModelColors(self._parameterNode.outputMarginModel)
             self._updateButtonStates()
 
+    def _buildCohortExecutionConfig(self) -> CohortExecutionConfig:
+        if not self._parameterNode:
+            return CohortExecutionConfig()
+
+        cohortStudyDefinitionPath = (
+            str(self.ui.cohortStudyDefinitionPathLineEdit.text)
+            if hasattr(self.ui, "cohortStudyDefinitionPathLineEdit")
+            else str(self._parameterNode.cohortStudyDefinitionPath)
+        )
+        cohortExecutionMode = (
+            str(self.ui.cohortExecutionModeComboBox.currentText)
+            if hasattr(self.ui, "cohortExecutionModeComboBox")
+            else str(self._parameterNode.cohortExecutionMode)
+        )
+        cohortMaxCases = (
+            int(self.ui.cohortMaxCasesSpinBox.value)
+            if hasattr(self.ui, "cohortMaxCasesSpinBox")
+            else int(self._parameterNode.cohortMaxCases)
+        )
+
+        self._parameterNode.cohortStudyDefinitionPath = cohortStudyDefinitionPath
+        self._parameterNode.cohortExecutionMode = cohortExecutionMode
+        self._parameterNode.cohortMaxCases = int(cohortMaxCases)
+
+        return CohortExecutionConfig(
+            studyDefinitionPath=cohortStudyDefinitionPath,
+            executionMode=cohortExecutionMode,
+            includeMarginMetrics=bool(self._parameterNode.cohortIncludeMarginMetrics),
+            includeSafetyMetrics=bool(self._parameterNode.cohortIncludeSafetyMetrics),
+            includeCoverageMetrics=bool(self._parameterNode.cohortIncludeCoverageMetrics),
+            includeFeasibilityMetrics=bool(self._parameterNode.cohortIncludeFeasibilityMetrics),
+            includeCoordinationMetrics=bool(self._parameterNode.cohortIncludeCoordinationMetrics),
+            includeVerificationMetrics=bool(self._parameterNode.cohortIncludeVerificationMetrics),
+            includeRecommendationMetrics=bool(self._parameterNode.cohortIncludeRecommendationMetrics),
+            maxCases=int(cohortMaxCases),
+        )
+
+    def onRunCohortEvaluationButton(self) -> None:
+        with slicer.util.tryWithErrorDisplay(_("Failed to run cohort evaluation."), waitCursor=True):
+            if not self.logic or not self._parameterNode:
+                raise RuntimeError("Module logic is not initialized.")
+
+            executionConfig = self._buildCohortExecutionConfig()
+            cohortResult = self.logic.runCohortStudy(self._parameterNode, executionConfig)
+
+            executionSummaryTable = self.logic.createOrReuseOwnedOutputNode(
+                "vtkMRMLTableNode",
+                COHORT_EXECUTION_SUMMARY_TABLE_NODE_NAME,
+                GENERATED_COHORT_EXECUTION_SUMMARY_TABLE_ATTRIBUTE,
+                self._parameterNode.cohortExecutionSummaryTable,
+            )
+            caseSummaryTable = self.logic.createOrReuseOwnedOutputNode(
+                "vtkMRMLTableNode",
+                COHORT_CASE_SUMMARY_TABLE_NODE_NAME,
+                GENERATED_COHORT_CASE_SUMMARY_TABLE_ATTRIBUTE,
+                self._parameterNode.cohortCaseSummaryTable,
+            )
+            aggregateMetricsTable = self.logic.createOrReuseOwnedOutputNode(
+                "vtkMRMLTableNode",
+                COHORT_AGGREGATE_METRICS_TABLE_NODE_NAME,
+                GENERATED_COHORT_AGGREGATE_METRICS_TABLE_ATTRIBUTE,
+                self._parameterNode.cohortAggregateMetricsTable,
+            )
+            comparisonSummaryTable = self.logic.createOrReuseOwnedOutputNode(
+                "vtkMRMLTableNode",
+                COHORT_COMPARISON_SUMMARY_TABLE_NODE_NAME,
+                GENERATED_COHORT_COMPARISON_SUMMARY_TABLE_ATTRIBUTE,
+                self._parameterNode.cohortComparisonSummaryTable,
+            )
+
+            self.logic.populateCohortExecutionSummaryTable(
+                executionSummaryTable,
+                cohortResult["executionSummary"],
+            )
+            self.logic.populateCohortCaseSummaryTable(
+                caseSummaryTable,
+                cohortResult["caseResults"],
+            )
+            self.logic.populateCohortAggregateMetricsTable(
+                aggregateMetricsTable,
+                cohortResult["aggregateMetrics"],
+            )
+            self.logic.populateCohortComparisonSummaryTable(
+                comparisonSummaryTable,
+                cohortResult["comparisonRows"],
+            )
+            self._parameterNode.cohortExecutionSummaryTable = executionSummaryTable
+            self._parameterNode.cohortCaseSummaryTable = caseSummaryTable
+            self._parameterNode.cohortAggregateMetricsTable = aggregateMetricsTable
+            self._parameterNode.cohortComparisonSummaryTable = comparisonSummaryTable
+
+            if hasattr(self.ui, "cohortStatusLabel"):
+                executionSummary = cohortResult["executionSummary"]
+                self.ui.cohortStatusLabel.text = (
+                    f"Study {str(executionSummary.get('StudyID', ''))}: "
+                    f"{int(executionSummary.get('SuccessCount', 0))}/"
+                    f"{int(executionSummary.get('CaseCount', 0))} cases succeeded"
+                )
+            self._updateButtonStates()
+
     def _buildPlanExportConfig(self) -> PlanExportConfig:
         if not self._parameterNode:
             return PlanExportConfig()
@@ -1183,6 +1404,10 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             addTable("probe_pair_coordination_summary.csv", parameterNode.probePairCoordinationSummaryTable)
             addTable("probe_coordination_summary.csv", parameterNode.probeCoordinationSummaryTable)
             addTable("no_touch_summary.csv", parameterNode.noTouchSummaryTable)
+        addTable("cohort_execution_summary.csv", parameterNode.cohortExecutionSummaryTable)
+        addTable("cohort_case_summary.csv", parameterNode.cohortCaseSummaryTable)
+        addTable("cohort_aggregate_metrics.csv", parameterNode.cohortAggregateMetricsTable)
+        addTable("cohort_comparison_summary.csv", parameterNode.cohortComparisonSummaryTable)
 
         if exportConfig.includeCoverageTables:
             addTable("coverage_summary.csv", self._findFirstTableNodeByName("SV3D Coverage Summary"))
@@ -1352,6 +1577,432 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             "fileCount": int(len(exportedFiles)),
             "status": "Success",
             "selectedScenarioName": str(selectedScenarioSummary.get("ScenarioName", "")),
+        }
+
+    @staticmethod
+    def _coerceBoolean(value: Any, defaultValue: bool = False) -> bool:
+        if value is None:
+            return defaultValue
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        valueText = str(value).strip().lower()
+        if valueText in ("1", "true", "yes", "y", "pass"):
+            return True
+        if valueText in ("0", "false", "no", "n", "fail"):
+            return False
+        return defaultValue
+
+    @staticmethod
+    def _resolveModuleRelativePath(inputPath: str) -> Path:
+        path = Path(inputPath).expanduser()
+        if path.is_absolute():
+            return path
+        return (Path(__file__).resolve().parent / path).resolve()
+
+    def loadCohortStudyDefinition(self, studyDefinitionPath: str) -> CohortStudyDefinition:
+        if not studyDefinitionPath.strip():
+            raise ValueError("Cohort study definition path is required.")
+
+        resolvedPath = self._resolveModuleRelativePath(studyDefinitionPath)
+        if not resolvedPath.exists():
+            raise ValueError(f"Cohort study definition was not found: {resolvedPath}")
+
+        with resolvedPath.open("r", encoding="utf-8") as inputFile:
+            rawDefinition = json.load(inputFile)
+
+        studyID = str(rawDefinition.get("studyId", "")).strip()
+        if not studyID:
+            raise ValueError("Cohort study definition is missing required field 'studyId'.")
+
+        rawCases = rawDefinition.get("cases", [])
+        if not isinstance(rawCases, list) or len(rawCases) == 0:
+            raise ValueError(f"Cohort study '{studyID}' does not define any case members.")
+
+        caseMembers: list[CohortCaseMember] = []
+        for caseIndex, rawCase in enumerate(rawCases):
+            if not isinstance(rawCase, dict):
+                raise ValueError(f"Cohort case at index {caseIndex} must be a JSON object.")
+            caseID = str(rawCase.get("caseId", f"Case{caseIndex + 1:03d}")).strip()
+            caseMembers.append(
+                CohortCaseMember(
+                    caseId=caseID,
+                    displayName=str(rawCase.get("displayName", caseID)),
+                    inputReference=str(rawCase.get("inputReference", "ScenarioID")),
+                    scenarioId=str(rawCase.get("scenarioId", "")),
+                    presetId=str(rawCase.get("presetId", "")),
+                    targetSegmentId=str(rawCase.get("targetSegmentId", "")),
+                    notes=str(rawCase.get("notes", "")),
+                )
+            )
+
+        return CohortStudyDefinition(
+            studyId=studyID,
+            displayName=str(rawDefinition.get("displayName", studyID)),
+            description=str(rawDefinition.get("description", "")),
+            cases=caseMembers,
+        )
+
+    @staticmethod
+    def _findRowByColumnValue(
+        rows: Sequence[dict[str, Any]],
+        columnCandidates: Sequence[str],
+        expectedValue: str,
+    ) -> dict[str, Any] | None:
+        expected = str(expectedValue).strip()
+        for row in rows:
+            for columnName in columnCandidates:
+                if str(row.get(columnName, "")).strip() == expected:
+                    return row
+        return None
+
+    @staticmethod
+    def _firstNumericValue(rowCandidates: Sequence[dict[str, Any]], columnCandidates: Sequence[str]) -> float | None:
+        for row in rowCandidates:
+            if not row:
+                continue
+            for columnName in columnCandidates:
+                rawValue = row.get(columnName)
+                if rawValue is None or str(rawValue).strip() == "":
+                    continue
+                try:
+                    numericValue = float(rawValue)
+                except Exception:
+                    continue
+                if math.isfinite(numericValue):
+                    return numericValue
+        return None
+
+    @staticmethod
+    def _firstStringValue(rowCandidates: Sequence[dict[str, Any]], columnCandidates: Sequence[str]) -> str:
+        for row in rowCandidates:
+            if not row:
+                continue
+            for columnName in columnCandidates:
+                valueText = str(row.get(columnName, "")).strip()
+                if valueText:
+                    return valueText
+        return ""
+
+    def _collectCurrentPlanMetricsForCohort(
+        self,
+        parameterNode: SurgicalVision3D_PlannerParameterNode,
+        executionConfig: CohortExecutionConfig,
+    ) -> dict[str, Any]:
+        metrics: dict[str, Any] = {}
+        planSummaryRows = self._tableNodeToDictionaries(parameterNode.planSummaryTable)
+        coverageRows = self._tableNodeToDictionaries(self._findFirstTableNodeByName("SV3D Coverage Summary"))
+        safetyRows = self._tableNodeToDictionaries(parameterNode.structureSafetySummaryTable)
+        coordinationRows = self._tableNodeToDictionaries(parameterNode.probeCoordinationSummaryTable)
+        verificationRows = self._tableNodeToDictionaries(self._findFirstTableNodeByName("SV3D Plan Verification Summary"))
+
+        planRow = planSummaryRows[0] if len(planSummaryRows) > 0 else {}
+        coverageRow = coverageRows[0] if len(coverageRows) > 0 else {}
+        coordinationRow = coordinationRows[0] if len(coordinationRows) > 0 else {}
+        verificationRow = verificationRows[0] if len(verificationRows) > 0 else {}
+
+        trajectoryCount = self._firstNumericValue([planRow], ["Trajectory Count", "TrajectoryCount"])
+        if trajectoryCount is not None:
+            metrics["TrajectoryCount"] = int(round(trajectoryCount))
+
+        minMargin = self._firstNumericValue([planRow], ["Minimum Signed Margin (mm)", "MinSignedMarginMm"])
+        medianMargin = self._firstNumericValue([planRow], ["Median Signed Margin (mm)", "MedianSignedMarginMm"])
+        coveragePercent = self._firstNumericValue([coverageRow], ["CoveragePercent", "Coverage Percent", "Coverage (%)"])
+        coordinationGatePass = self._coerceBoolean(
+            self._firstStringValue([coordinationRow], ["Coordination Gate Pass", "CoordinationGatePass"]),
+            defaultValue=True,
+        )
+        verificationMeanTargetDeviation = self._firstNumericValue(
+            [verificationRow],
+            ["MeanTargetDeviationMm", "Mean Target Deviation (mm)"],
+        )
+
+        worstStructureDistance = None
+        if len(safetyRows) > 0:
+            distanceValues = [
+                self._firstNumericValue([row], ["Minimum Distance (mm)", "MinDistanceMm"])
+                for row in safetyRows
+            ]
+            finiteDistances = [value for value in distanceValues if value is not None and math.isfinite(value)]
+            if len(finiteDistances) > 0:
+                worstStructureDistance = min(finiteDistances)
+
+        if executionConfig.includeMarginMetrics and minMargin is not None:
+            metrics["MinSignedMarginMm"] = float(minMargin)
+        if executionConfig.includeMarginMetrics and medianMargin is not None:
+            metrics["MedianSignedMarginMm"] = float(medianMargin)
+        if executionConfig.includeCoverageMetrics and coveragePercent is not None:
+            metrics["CoveragePercent"] = float(coveragePercent)
+        if executionConfig.includeSafetyMetrics and worstStructureDistance is not None:
+            metrics["WorstStructureMinDistanceMm"] = float(worstStructureDistance)
+        if executionConfig.includeCoordinationMetrics:
+            metrics["CoordinationGatePass"] = bool(coordinationGatePass)
+        if executionConfig.includeVerificationMetrics and verificationMeanTargetDeviation is not None:
+            metrics["MeanTargetDeviationMm"] = float(verificationMeanTargetDeviation)
+        return metrics
+
+    def collectCohortCaseMetrics(
+        self,
+        parameterNode: SurgicalVision3D_PlannerParameterNode,
+        caseMember: CohortCaseMember,
+        executionConfig: CohortExecutionConfig,
+    ) -> dict[str, Any]:
+        executionModeText = str(executionConfig.executionMode or "").strip().lower()
+        sourceMode = str(caseMember.inputReference or "ScenarioID").strip().lower()
+        if executionModeText == "currentworkingplan":
+            sourceMode = "currentworkingplan"
+        if sourceMode in ("currentworkingplan", "currentplan"):
+            return self._collectCurrentPlanMetricsForCohort(parameterNode, executionConfig)
+
+        scenarioID = str(caseMember.scenarioId).strip()
+        if not scenarioID:
+            raise ValueError(f"Cohort case '{caseMember.caseId}' requires a non-empty scenarioId.")
+
+        scenarioRegistryRows = self._tableNodeToDictionaries(self._findFirstTableNodeByName("SV3D Scenario Registry"))
+        scenarioRow = self._findRowByColumnValue(scenarioRegistryRows, ["ScenarioID"], scenarioID)
+        if scenarioRow is None:
+            raise ValueError(f"Cohort case '{caseMember.caseId}' references unknown scenario ID '{scenarioID}'.")
+
+        comparisonRows = self._tableNodeToDictionaries(self._findFirstTableNodeByName("SV3D Scenario Comparison"))
+        comparisonRow = self._findRowByColumnValue(comparisonRows, ["ScenarioID"], scenarioID) or {}
+
+        feasibilityRows = self._tableNodeToDictionaries(self._findFirstTableNodeByName("SV3D Candidate Feasibility Summary"))
+        feasibilityRow = self._findRowByColumnValue(feasibilityRows, ["ScenarioID"], scenarioID) or {}
+
+        verificationRows = self._tableNodeToDictionaries(self._findFirstTableNodeByName("SV3D Trajectory Verification Summary"))
+        verificationRow = verificationRows[0] if len(verificationRows) > 0 else {}
+
+        metrics: dict[str, Any] = {
+            "ScenarioID": scenarioID,
+        }
+        metrics["PresetID"] = self._firstStringValue(
+            [comparisonRow, scenarioRow],
+            ["ApplicatorPresetID", "PresetID", "Preset ID"],
+        )
+        if executionConfig.includeRecommendationMetrics:
+            metrics["RecommendationTag"] = self._firstStringValue(
+                [feasibilityRow, comparisonRow],
+                ["RecommendationTag", "Tag"],
+            )
+        if executionConfig.includeFeasibilityMetrics:
+            metrics["IsFeasible"] = self._coerceBoolean(
+                self._firstStringValue([feasibilityRow], ["IsFeasible", "Is Feasible"]),
+                defaultValue=False,
+            )
+        if executionConfig.includeCoordinationMetrics:
+            metrics["CoordinationGatePass"] = self._coerceBoolean(
+                self._firstStringValue(
+                    [feasibilityRow, comparisonRow],
+                    ["CoordinationGatePass", "Coordination Gate Pass"],
+                ),
+                defaultValue=True,
+            )
+
+        if executionConfig.includeMarginMetrics:
+            minMargin = self._firstNumericValue([comparisonRow], ["MinSignedMarginMm", "Minimum Signed Margin (mm)"])
+            medianMargin = self._firstNumericValue([comparisonRow], ["MedianSignedMarginMm", "Median Signed Margin (mm)"])
+            trajectoryCount = self._firstNumericValue([comparisonRow], ["TrajectoryCount", "Trajectory Count"])
+            if minMargin is not None:
+                metrics["MinSignedMarginMm"] = float(minMargin)
+            if medianMargin is not None:
+                metrics["MedianSignedMarginMm"] = float(medianMargin)
+            if trajectoryCount is not None:
+                metrics["TrajectoryCount"] = int(round(trajectoryCount))
+
+        if executionConfig.includeCoverageMetrics:
+            coveragePercent = self._firstNumericValue([comparisonRow], ["CoveragePercent", "Coverage Percent"])
+            if coveragePercent is not None:
+                metrics["CoveragePercent"] = float(coveragePercent)
+
+        if executionConfig.includeSafetyMetrics:
+            worstStructure = self._firstNumericValue(
+                [comparisonRow],
+                ["WorstStructureMinDistanceMm", "Worst Structure Min Distance (mm)"],
+            )
+            if worstStructure is not None:
+                metrics["WorstStructureMinDistanceMm"] = float(worstStructure)
+
+        if executionConfig.includeRecommendationMetrics:
+            compositeScore = self._firstNumericValue([comparisonRow], ["CompositeScore"])
+            if compositeScore is not None:
+                metrics["CompositeScore"] = float(compositeScore)
+
+        if executionConfig.includeVerificationMetrics:
+            meanTargetDeviation = self._firstNumericValue(
+                [verificationRow],
+                ["MeanTargetDeviationMm", "Mean Target Deviation (mm)"],
+            )
+            if meanTargetDeviation is not None:
+                metrics["MeanTargetDeviationMm"] = float(meanTargetDeviation)
+        return metrics
+
+    def runCaseMemberEvaluation(
+        self,
+        parameterNode: SurgicalVision3D_PlannerParameterNode,
+        caseMember: CohortCaseMember,
+        executionConfig: CohortExecutionConfig,
+    ) -> CohortCaseResult:
+        try:
+            metricValues = self.collectCohortCaseMetrics(parameterNode, caseMember, executionConfig)
+            statusMessage = "Completed"
+            if len(metricValues) <= 2:
+                statusMessage = "Completed with limited metrics"
+            return CohortCaseResult(
+                caseId=caseMember.caseId,
+                displayName=caseMember.displayName,
+                inputReference=caseMember.inputReference,
+                scenarioId=caseMember.scenarioId,
+                executionStatus="Success",
+                statusMessage=statusMessage,
+                presetId=caseMember.presetId,
+                targetSegmentId=caseMember.targetSegmentId,
+                metricValues=metricValues,
+            )
+        except Exception as exc:
+            return CohortCaseResult(
+                caseId=caseMember.caseId,
+                displayName=caseMember.displayName,
+                inputReference=caseMember.inputReference,
+                scenarioId=caseMember.scenarioId,
+                executionStatus="Failed",
+                statusMessage=str(exc),
+                presetId=caseMember.presetId,
+                targetSegmentId=caseMember.targetSegmentId,
+                metricValues={},
+            )
+
+    @staticmethod
+    def aggregateCohortMetrics(caseResults: Sequence[CohortCaseResult]) -> dict[str, float | int]:
+        successfulResults = [result for result in caseResults if result.executionStatus == "Success"]
+
+        def numericValues(metricName: str) -> list[float]:
+            values: list[float] = []
+            for caseResult in successfulResults:
+                rawValue = caseResult.metricValues.get(metricName)
+                if rawValue is None:
+                    continue
+                try:
+                    numericValue = float(rawValue)
+                except Exception:
+                    continue
+                if math.isfinite(numericValue):
+                    values.append(numericValue)
+            return values
+
+        aggregated: dict[str, float | int] = {
+            "CaseCount": int(len(caseResults)),
+            "SuccessCount": int(len(successfulResults)),
+            "FailureCount": int(len(caseResults) - len(successfulResults)),
+        }
+        for metricName in (
+            "CoveragePercent",
+            "MinSignedMarginMm",
+            "MedianSignedMarginMm",
+            "WorstStructureMinDistanceMm",
+            "CompositeScore",
+            "TrajectoryCount",
+            "MeanTargetDeviationMm",
+        ):
+            values = numericValues(metricName)
+            if len(values) == 0:
+                continue
+            aggregated[f"Mean{metricName}"] = float(np.mean(values))
+            aggregated[f"Median{metricName}"] = float(np.median(values))
+            aggregated[f"Min{metricName}"] = float(np.min(values))
+            aggregated[f"Max{metricName}"] = float(np.max(values))
+
+        feasibleCount = int(
+            sum(
+                1
+                for caseResult in successfulResults
+                if SurgicalVision3D_PlannerLogic._coerceBoolean(caseResult.metricValues.get("IsFeasible"), defaultValue=False)
+            )
+        )
+        recommendationTagCount = int(
+            sum(1 for caseResult in successfulResults if str(caseResult.metricValues.get("RecommendationTag", "")).strip())
+        )
+        aggregated["FeasibleCaseCount"] = feasibleCount
+        aggregated["RecommendationTaggedCaseCount"] = recommendationTagCount
+        return aggregated
+
+    @staticmethod
+    def groupCohortResultsByPreset(caseResults: Sequence[CohortCaseResult]) -> dict[str, list[CohortCaseResult]]:
+        groupedResults: dict[str, list[CohortCaseResult]] = {}
+        for caseResult in caseResults:
+            groupKey = str(caseResult.metricValues.get("PresetID", "")).strip() or "UnspecifiedPreset"
+            groupedResults.setdefault(groupKey, []).append(caseResult)
+        return groupedResults
+
+    def computeCohortComparisonSummary(self, caseResults: Sequence[CohortCaseResult]) -> list[dict[str, float | int | str]]:
+        groupedByPreset = self.groupCohortResultsByPreset(caseResults)
+        summaryRows: list[dict[str, float | int | str]] = []
+        for presetID in sorted(groupedByPreset.keys()):
+            groupResults = groupedByPreset[presetID]
+            successfulGroup = [result for result in groupResults if result.executionStatus == "Success"]
+            coverageValues: list[float] = []
+            compositeValues: list[float] = []
+            for result in successfulGroup:
+                coverageRaw = result.metricValues.get("CoveragePercent")
+                if coverageRaw is not None:
+                    try:
+                        coverageValue = float(coverageRaw)
+                        if math.isfinite(coverageValue):
+                            coverageValues.append(coverageValue)
+                    except Exception:
+                        pass
+                compositeRaw = result.metricValues.get("CompositeScore")
+                if compositeRaw is not None:
+                    try:
+                        compositeValue = float(compositeRaw)
+                        if math.isfinite(compositeValue):
+                            compositeValues.append(compositeValue)
+                    except Exception:
+                        pass
+            summaryRows.append(
+                {
+                    "PresetID": presetID,
+                    "CaseCount": int(len(groupResults)),
+                    "SuccessCount": int(len(successfulGroup)),
+                    "MeanCoveragePercent": float(np.mean(coverageValues)) if len(coverageValues) > 0 else float("nan"),
+                    "MeanCompositeScore": float(np.mean(compositeValues)) if len(compositeValues) > 0 else float("nan"),
+                }
+            )
+        return summaryRows
+
+    def runCohortStudy(
+        self,
+        parameterNode: SurgicalVision3D_PlannerParameterNode,
+        executionConfig: CohortExecutionConfig,
+    ) -> dict[str, Any]:
+        studyDefinition = self.loadCohortStudyDefinition(executionConfig.studyDefinitionPath)
+        caseMembers = list(studyDefinition.cases)
+        if executionConfig.maxCases > 0:
+            caseMembers = caseMembers[: int(executionConfig.maxCases)]
+
+        caseResults = [
+            self.runCaseMemberEvaluation(parameterNode, caseMember, executionConfig)
+            for caseMember in caseMembers
+        ]
+        successCount = int(sum(1 for result in caseResults if result.executionStatus == "Success"))
+        executionSummary = {
+            "StudyID": studyDefinition.studyId,
+            "StudyDisplayName": studyDefinition.displayName,
+            "ExecutionMode": executionConfig.executionMode,
+            "CaseCount": int(len(caseResults)),
+            "SuccessCount": successCount,
+            "FailureCount": int(len(caseResults) - successCount),
+            "SuccessRatePercent": float(100.0 * successCount / len(caseResults)) if len(caseResults) > 0 else 0.0,
+            "StudyDescription": studyDefinition.description,
+        }
+        aggregateMetrics = self.aggregateCohortMetrics(caseResults)
+        comparisonRows = self.computeCohortComparisonSummary(caseResults)
+        return {
+            "studyDefinition": studyDefinition,
+            "caseResults": caseResults,
+            "executionSummary": executionSummary,
+            "aggregateMetrics": aggregateMetrics,
+            "comparisonRows": comparisonRows,
         }
 
     @staticmethod
@@ -2662,6 +3313,156 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             [str(noTouchSummary.get("FailedTrajectoryIndices", ""))],
         )
         self._addStringColumn(tableNode, "Reason", [str(noTouchSummary.get("Reason", ""))])
+
+    def populateCohortExecutionSummaryTable(
+        self,
+        tableNode: vtkMRMLTableNode | None,
+        executionSummary: dict[str, Any],
+    ) -> None:
+        if not tableNode:
+            raise ValueError("Cohort execution summary table node is required.")
+
+        tableNode.RemoveAllColumns()
+        orderedFields = [
+            "StudyID",
+            "StudyDisplayName",
+            "ExecutionMode",
+            "CaseCount",
+            "SuccessCount",
+            "FailureCount",
+            "SuccessRatePercent",
+            "StudyDescription",
+        ]
+        self._addStringColumn(tableNode, "Field", orderedFields)
+        self._addStringColumn(tableNode, "Value", [str(executionSummary.get(field, "")) for field in orderedFields])
+
+    def populateCohortCaseSummaryTable(
+        self,
+        tableNode: vtkMRMLTableNode | None,
+        caseResults: Sequence[CohortCaseResult],
+    ) -> None:
+        if not tableNode:
+            raise ValueError("Cohort case summary table node is required.")
+
+        tableNode.RemoveAllColumns()
+        self._addStringColumn(tableNode, "CaseID", [result.caseId for result in caseResults])
+        self._addStringColumn(tableNode, "DisplayName", [result.displayName for result in caseResults])
+        self._addStringColumn(tableNode, "InputReference", [result.inputReference for result in caseResults])
+        self._addStringColumn(tableNode, "ScenarioID", [result.scenarioId for result in caseResults])
+        self._addStringColumn(tableNode, "ExecutionStatus", [result.executionStatus for result in caseResults])
+        self._addStringColumn(tableNode, "StatusMessage", [result.statusMessage for result in caseResults])
+        self._addStringColumn(tableNode, "PresetID", [str(result.metricValues.get("PresetID", result.presetId)) for result in caseResults])
+        self._addNumericColumn(
+            tableNode,
+            "TrajectoryCount",
+            [
+                float(result.metricValues.get("TrajectoryCount", float("nan")))
+                if result.executionStatus == "Success"
+                else float("nan")
+                for result in caseResults
+            ],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "CoveragePercent",
+            [
+                float(result.metricValues.get("CoveragePercent", float("nan")))
+                if result.executionStatus == "Success"
+                else float("nan")
+                for result in caseResults
+            ],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "MinSignedMarginMm",
+            [
+                float(result.metricValues.get("MinSignedMarginMm", float("nan")))
+                if result.executionStatus == "Success"
+                else float("nan")
+                for result in caseResults
+            ],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "MedianSignedMarginMm",
+            [
+                float(result.metricValues.get("MedianSignedMarginMm", float("nan")))
+                if result.executionStatus == "Success"
+                else float("nan")
+                for result in caseResults
+            ],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "WorstStructureMinDistanceMm",
+            [
+                float(result.metricValues.get("WorstStructureMinDistanceMm", float("nan")))
+                if result.executionStatus == "Success"
+                else float("nan")
+                for result in caseResults
+            ],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "CompositeScore",
+            [
+                float(result.metricValues.get("CompositeScore", float("nan")))
+                if result.executionStatus == "Success"
+                else float("nan")
+                for result in caseResults
+            ],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "IsFeasible",
+            [
+                1 if self._coerceBoolean(result.metricValues.get("IsFeasible"), defaultValue=False) else 0
+                for result in caseResults
+            ],
+            integer=True,
+        )
+        self._addStringColumn(
+            tableNode,
+            "RecommendationTag",
+            [str(result.metricValues.get("RecommendationTag", "")) for result in caseResults],
+        )
+
+    def populateCohortAggregateMetricsTable(
+        self,
+        tableNode: vtkMRMLTableNode | None,
+        aggregateMetrics: dict[str, Any],
+    ) -> None:
+        if not tableNode:
+            raise ValueError("Cohort aggregate metrics table node is required.")
+
+        tableNode.RemoveAllColumns()
+        orderedFields = sorted(str(fieldName) for fieldName in aggregateMetrics.keys())
+        self._addStringColumn(tableNode, "Metric", orderedFields)
+        self._addStringColumn(tableNode, "Value", [str(aggregateMetrics.get(fieldName, "")) for fieldName in orderedFields])
+
+    def populateCohortComparisonSummaryTable(
+        self,
+        tableNode: vtkMRMLTableNode | None,
+        comparisonRows: Sequence[dict[str, float | int | str]],
+    ) -> None:
+        if not tableNode:
+            raise ValueError("Cohort comparison summary table node is required.")
+
+        orderedRows = sorted(comparisonRows, key=lambda row: str(row.get("PresetID", "")))
+        tableNode.RemoveAllColumns()
+        self._addStringColumn(tableNode, "PresetID", [str(row.get("PresetID", "")) for row in orderedRows])
+        self._addNumericColumn(tableNode, "CaseCount", [int(row.get("CaseCount", 0)) for row in orderedRows], integer=True)
+        self._addNumericColumn(tableNode, "SuccessCount", [int(row.get("SuccessCount", 0)) for row in orderedRows], integer=True)
+        self._addNumericColumn(
+            tableNode,
+            "MeanCoveragePercent",
+            [float(row.get("MeanCoveragePercent", float("nan"))) for row in orderedRows],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "MeanCompositeScore",
+            [float(row.get("MeanCompositeScore", float("nan"))) for row in orderedRows],
+        )
 
     def populateExportSummaryTable(
         self,

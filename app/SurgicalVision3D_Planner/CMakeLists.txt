@@ -9,6 +9,9 @@ set(MODULE_PYTHON_SCRIPTS
 set(MODULE_PYTHON_RESOURCES
   Resources/Icons/${MODULE_NAME}.png
   Resources/UI/${MODULE_NAME}.ui
+  Resources/Cohorts/cohort_schema_v1.json
+  Resources/Cohorts/cohort_catalog_v1.json
+  Resources/Cohorts/studies/example_cohort_v1.json
   )
 
 #-----------------------------------------------------------------------------

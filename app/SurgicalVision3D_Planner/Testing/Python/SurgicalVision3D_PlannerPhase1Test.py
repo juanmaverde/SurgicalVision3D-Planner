@@ -45,6 +45,10 @@ class SurgicalVision3D_PlannerPhase1Test(ScriptedLoadableModuleTest):
         self.test_selected_scenario_export_mode()
         self.test_export_bundle_handles_missing_optional_outputs()
         self.test_repeated_export_sequence_behavior()
+        self.test_cohort_definition_loading_from_resource()
+        self.test_cohort_batch_execution_and_aggregation()
+        self.test_cohort_output_tables_are_reused_deterministically()
+        self.test_cohort_export_collection_includes_cohort_tables()
         self.test_recolor_restore_uses_full_array_length()
         self.test_parameter_node_restore_round_trip()
 
@@ -802,6 +806,279 @@ class SurgicalVision3D_PlannerPhase1Test(ScriptedLoadableModuleTest):
                     exportedPath.rmdir()
             if exportRoot.exists():
                 exportRoot.rmdir()
+
+    def test_cohort_definition_loading_from_resource(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        studyDefinition = logic.loadCohortStudyDefinition("Resources/Cohorts/studies/example_cohort_v1.json")
+        self.assertEqual(studyDefinition.studyId, "example_cohort_v1")
+        self.assertEqual(len(studyDefinition.cases), 1)
+        self.assertEqual(studyDefinition.cases[0].inputReference, "CurrentWorkingPlan")
+
+    def test_cohort_batch_execution_and_aggregation(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        parameterNode = logic.getParameterNode()
+
+        scenarioRegistryTable = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTableNode", "SV3D Scenario Registry")
+        logic._addStringColumn(scenarioRegistryTable, "ScenarioID", ["S001", "S002"])
+        logic._addStringColumn(scenarioRegistryTable, "ScenarioName", ["Baseline", "Candidate A"])
+        logic._addStringColumn(scenarioRegistryTable, "PresetID", ["PresetA", "PresetB"])
+
+        scenarioComparisonTable = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTableNode", "SV3D Scenario Comparison")
+        logic._addStringColumn(scenarioComparisonTable, "ScenarioID", ["S001", "S002"])
+        logic._addStringColumn(scenarioComparisonTable, "ApplicatorPresetID", ["PresetA", "PresetB"])
+        logic._addNumericColumn(scenarioComparisonTable, "CoveragePercent", [80.0, 60.0])
+        logic._addNumericColumn(scenarioComparisonTable, "MinSignedMarginMm", [2.0, -1.0])
+        logic._addNumericColumn(scenarioComparisonTable, "MedianSignedMarginMm", [4.0, 1.0])
+        logic._addNumericColumn(scenarioComparisonTable, "WorstStructureMinDistanceMm", [6.0, 3.0])
+        logic._addNumericColumn(scenarioComparisonTable, "CompositeScore", [0.85, 0.50])
+        logic._addNumericColumn(scenarioComparisonTable, "TrajectoryCount", [2, 3], integer=True)
+
+        candidateFeasibilityTable = slicer.mrmlScene.AddNewNodeByClass(
+            "vtkMRMLTableNode",
+            "SV3D Candidate Feasibility Summary",
+        )
+        logic._addStringColumn(candidateFeasibilityTable, "ScenarioID", ["S001", "S002"])
+        logic._addStringColumn(candidateFeasibilityTable, "RecommendationTag", ["FeasibleTop", "CoverageFail"])
+        logic._addNumericColumn(candidateFeasibilityTable, "IsFeasible", [1, 0], integer=True)
+        logic._addNumericColumn(candidateFeasibilityTable, "CoordinationGatePass", [1, 1], integer=True)
+
+        verificationTable = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTableNode", "SV3D Trajectory Verification Summary")
+        logic._addNumericColumn(verificationTable, "MeanTargetDeviationMm", [2.5])
+
+        cohortRoot = Path(tempfile.mkdtemp(prefix="sv3d_cohort_case_"))
+        try:
+            cohortPath = cohortRoot / "cohort.json"
+            cohortPayload = {
+                "studyId": "SyntheticStudy",
+                "displayName": "Synthetic Study",
+                "description": "Batch synthetic run for Phase 11B tests.",
+                "cases": [
+                    {
+                        "caseId": "CASE001",
+                        "displayName": "Baseline",
+                        "inputReference": "ScenarioID",
+                        "scenarioId": "S001",
+                    },
+                    {
+                        "caseId": "CASE002",
+                        "displayName": "Candidate A",
+                        "inputReference": "ScenarioID",
+                        "scenarioId": "S002",
+                    },
+                    {
+                        "caseId": "CASE003",
+                        "displayName": "Missing Scenario",
+                        "inputReference": "ScenarioID",
+                        "scenarioId": "S999",
+                    },
+                ],
+            }
+            cohortPath.write_text(json.dumps(cohortPayload, indent=2), encoding="utf-8")
+
+            executionConfig = planner.CohortExecutionConfig(
+                studyDefinitionPath=str(cohortPath),
+                executionMode="ScenarioRegistry",
+                includeMarginMetrics=True,
+                includeSafetyMetrics=True,
+                includeCoverageMetrics=True,
+                includeFeasibilityMetrics=True,
+                includeCoordinationMetrics=True,
+                includeVerificationMetrics=True,
+                includeRecommendationMetrics=True,
+                maxCases=0,
+            )
+            cohortResult = logic.runCohortStudy(parameterNode, executionConfig)
+        finally:
+            for exportedPath in sorted(cohortRoot.rglob("*"), reverse=True):
+                if exportedPath.is_file():
+                    exportedPath.unlink()
+                elif exportedPath.is_dir():
+                    exportedPath.rmdir()
+            if cohortRoot.exists():
+                cohortRoot.rmdir()
+
+        executionSummary = cohortResult["executionSummary"]
+        self.assertEqual(str(executionSummary["StudyID"]), "SyntheticStudy")
+        self.assertEqual(int(executionSummary["CaseCount"]), 3)
+        self.assertEqual(int(executionSummary["SuccessCount"]), 2)
+        self.assertEqual(int(executionSummary["FailureCount"]), 1)
+
+        aggregateMetrics = cohortResult["aggregateMetrics"]
+        self.assertAlmostEqual(float(aggregateMetrics["MeanCoveragePercent"]), 70.0, places=6)
+        self.assertEqual(int(aggregateMetrics["FeasibleCaseCount"]), 1)
+        self.assertEqual(int(aggregateMetrics["RecommendationTaggedCaseCount"]), 2)
+
+        comparisonRows = sorted(cohortResult["comparisonRows"], key=lambda row: str(row.get("PresetID", "")))
+        self.assertEqual(len(comparisonRows), 2)
+        self.assertEqual(str(comparisonRows[0]["PresetID"]), "PresetA")
+        self.assertEqual(str(comparisonRows[1]["PresetID"]), "PresetB")
+
+        caseResults = cohortResult["caseResults"]
+        self.assertEqual(str(caseResults[2].executionStatus), "Failed")
+        self.assertIn("unknown scenario ID", str(caseResults[2].statusMessage))
+
+    def test_cohort_output_tables_are_reused_deterministically(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        executionSummary = {
+            "StudyID": "Study001",
+            "StudyDisplayName": "Study Display",
+            "ExecutionMode": "ScenarioRegistry",
+            "CaseCount": 2,
+            "SuccessCount": 2,
+            "FailureCount": 0,
+            "SuccessRatePercent": 100.0,
+            "StudyDescription": "Synthetic deterministic table reuse test.",
+        }
+        caseResults = [
+            planner.CohortCaseResult(
+                caseId="CASE001",
+                displayName="Case 1",
+                inputReference="ScenarioID",
+                scenarioId="S001",
+                executionStatus="Success",
+                statusMessage="Completed",
+                metricValues={
+                    "PresetID": "PresetA",
+                    "CoveragePercent": 80.0,
+                    "MinSignedMarginMm": 2.0,
+                    "MedianSignedMarginMm": 4.0,
+                    "WorstStructureMinDistanceMm": 6.0,
+                    "CompositeScore": 0.8,
+                    "TrajectoryCount": 2,
+                    "IsFeasible": True,
+                    "RecommendationTag": "Feasible",
+                },
+            ),
+            planner.CohortCaseResult(
+                caseId="CASE002",
+                displayName="Case 2",
+                inputReference="ScenarioID",
+                scenarioId="S002",
+                executionStatus="Success",
+                statusMessage="Completed",
+                metricValues={
+                    "PresetID": "PresetB",
+                    "CoveragePercent": 60.0,
+                    "MinSignedMarginMm": -1.0,
+                    "MedianSignedMarginMm": 1.0,
+                    "WorstStructureMinDistanceMm": 3.0,
+                    "CompositeScore": 0.5,
+                    "TrajectoryCount": 3,
+                    "IsFeasible": False,
+                    "RecommendationTag": "CoverageFail",
+                },
+            ),
+        ]
+        aggregateMetrics = logic.aggregateCohortMetrics(caseResults)
+        comparisonRows = logic.computeCohortComparisonSummary(caseResults)
+
+        executionTable = logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            planner.COHORT_EXECUTION_SUMMARY_TABLE_NODE_NAME,
+            planner.GENERATED_COHORT_EXECUTION_SUMMARY_TABLE_ATTRIBUTE,
+        )
+        caseTable = logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            planner.COHORT_CASE_SUMMARY_TABLE_NODE_NAME,
+            planner.GENERATED_COHORT_CASE_SUMMARY_TABLE_ATTRIBUTE,
+        )
+        aggregateTable = logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            planner.COHORT_AGGREGATE_METRICS_TABLE_NODE_NAME,
+            planner.GENERATED_COHORT_AGGREGATE_METRICS_TABLE_ATTRIBUTE,
+        )
+        comparisonTable = logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            planner.COHORT_COMPARISON_SUMMARY_TABLE_NODE_NAME,
+            planner.GENERATED_COHORT_COMPARISON_SUMMARY_TABLE_ATTRIBUTE,
+        )
+
+        logic.populateCohortExecutionSummaryTable(executionTable, executionSummary)
+        logic.populateCohortCaseSummaryTable(caseTable, caseResults)
+        logic.populateCohortAggregateMetricsTable(aggregateTable, aggregateMetrics)
+        logic.populateCohortComparisonSummaryTable(comparisonTable, comparisonRows)
+        self.assertEqual(logic.tableNodeRowCount(executionTable), 8)
+        self.assertEqual(logic.tableNodeRowCount(caseTable), 2)
+        self.assertGreaterEqual(logic.tableNodeRowCount(aggregateTable), 3)
+        self.assertEqual(logic.tableNodeRowCount(comparisonTable), 2)
+
+        reusedExecutionTable = logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            planner.COHORT_EXECUTION_SUMMARY_TABLE_NODE_NAME,
+            planner.GENERATED_COHORT_EXECUTION_SUMMARY_TABLE_ATTRIBUTE,
+            executionTable,
+        )
+        reusedCaseTable = logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            planner.COHORT_CASE_SUMMARY_TABLE_NODE_NAME,
+            planner.GENERATED_COHORT_CASE_SUMMARY_TABLE_ATTRIBUTE,
+            caseTable,
+        )
+        reusedAggregateTable = logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            planner.COHORT_AGGREGATE_METRICS_TABLE_NODE_NAME,
+            planner.GENERATED_COHORT_AGGREGATE_METRICS_TABLE_ATTRIBUTE,
+            aggregateTable,
+        )
+        reusedComparisonTable = logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            planner.COHORT_COMPARISON_SUMMARY_TABLE_NODE_NAME,
+            planner.GENERATED_COHORT_COMPARISON_SUMMARY_TABLE_ATTRIBUTE,
+            comparisonTable,
+        )
+        self.assertEqual(reusedExecutionTable.GetID(), executionTable.GetID())
+        self.assertEqual(reusedCaseTable.GetID(), caseTable.GetID())
+        self.assertEqual(reusedAggregateTable.GetID(), aggregateTable.GetID())
+        self.assertEqual(reusedComparisonTable.GetID(), comparisonTable.GetID())
+
+        logic.populateCohortComparisonSummaryTable(reusedComparisonTable, [])
+        self.assertEqual(logic.tableNodeRowCount(reusedComparisonTable), 0)
+
+        ownedComparisonTables = [
+            node
+            for node in slicer.util.getNodesByClass("vtkMRMLTableNode")
+            if node.GetAttribute(planner.GENERATED_COHORT_COMPARISON_SUMMARY_TABLE_ATTRIBUTE) == "1"
+        ]
+        self.assertEqual(len(ownedComparisonTables), 1)
+
+    def test_cohort_export_collection_includes_cohort_tables(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        parameterNode = logic.getParameterNode()
+        exportConfig = planner.PlanExportConfig(
+            exportMode="CurrentWorkingPlan",
+            exportBaseName="CohortExportSmoke",
+            includeTrajectoryTables=False,
+            includeSafetyTables=False,
+            includeCoverageTables=False,
+            includeFeasibilityTables=False,
+            includeCoordinationTables=False,
+            includeScenarioComparison=False,
+            includeRecommendationOutputs=False,
+        )
+
+        parameterNode.cohortExecutionSummaryTable = slicer.mrmlScene.AddNewNodeByClass(
+            "vtkMRMLTableNode",
+            planner.COHORT_EXECUTION_SUMMARY_TABLE_NODE_NAME,
+        )
+        parameterNode.cohortCaseSummaryTable = slicer.mrmlScene.AddNewNodeByClass(
+            "vtkMRMLTableNode",
+            planner.COHORT_CASE_SUMMARY_TABLE_NODE_NAME,
+        )
+        parameterNode.cohortAggregateMetricsTable = slicer.mrmlScene.AddNewNodeByClass(
+            "vtkMRMLTableNode",
+            planner.COHORT_AGGREGATE_METRICS_TABLE_NODE_NAME,
+        )
+        parameterNode.cohortComparisonSummaryTable = slicer.mrmlScene.AddNewNodeByClass(
+            "vtkMRMLTableNode",
+            planner.COHORT_COMPARISON_SUMMARY_TABLE_NODE_NAME,
+        )
+
+        _, tableExports = logic.collectCurrentPlanExportData(parameterNode, exportConfig)
+        exportedNames = {filename for filename, _ in tableExports}
+        self.assertIn("cohort_execution_summary.csv", exportedNames)
+        self.assertIn("cohort_case_summary.csv", exportedNames)
+        self.assertIn("cohort_aggregate_metrics.csv", exportedNames)
+        self.assertIn("cohort_comparison_summary.csv", exportedNames)
 
     def test_recolor_restore_uses_full_array_length(self):
         signedDistances = vtk.vtkDoubleArray()

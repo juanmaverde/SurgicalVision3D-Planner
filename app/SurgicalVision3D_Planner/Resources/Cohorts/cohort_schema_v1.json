@@ -1,0 +1,26 @@
+{
+  "schemaName": "SV3D.CohortStudyDefinition",
+  "schemaVersion": "1.0",
+  "description": "Typed schema reference for deterministic cohort/study batch definitions.",
+  "requiredTopLevelFields": [
+    "studyId",
+    "cases"
+  ],
+  "optionalTopLevelFields": [
+    "displayName",
+    "description"
+  ],
+  "supportedCaseInputReferenceModes": [
+    "ScenarioID",
+    "CurrentWorkingPlan"
+  ],
+  "caseFields": [
+    "caseId",
+    "displayName",
+    "inputReference",
+    "scenarioId",
+    "presetId",
+    "targetSegmentId",
+    "notes"
+  ]
+}

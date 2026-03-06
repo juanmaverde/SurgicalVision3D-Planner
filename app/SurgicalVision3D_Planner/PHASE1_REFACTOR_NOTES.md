@@ -179,3 +179,42 @@
 - Rich document reporting (PDF/slide generation).
 - External upload/sync or database export integrations.
 - Styled human-facing report composition beyond structured JSON/CSV bundles.
+
+## Phase 11B cohort and study support layer
+- Added a typed cohort/study batch model for deterministic multi-case execution:
+  - `CohortCaseMember`
+  - `CohortStudyDefinition`
+  - `CohortExecutionConfig`
+  - `CohortCaseResult`
+- Added parameter-node state for cohort execution preferences:
+  - cohort definition path, execution mode, include flags, and max-case cap
+  - owned output references for cohort execution/case/aggregate/comparison tables
+- Added conservative cohort execution helpers:
+  - cohort definition loading from local JSON (`Resources/Cohorts/...`)
+  - case-level metric collection reusing existing table outputs
+  - aggregate metric computation and preset-group comparison summaries
+  - explicit per-case success/failure status without aborting the full batch
+- Added deterministic module-owned cohort outputs:
+  - `SV3D Cohort Execution Summary`
+  - `SV3D Cohort Case Summary`
+  - `SV3D Cohort Aggregate Metrics`
+  - `SV3D Cohort Comparison Summary`
+- Added minimal cohort UI block:
+  - cohort definition path
+  - execution mode selector
+  - include/exclude metric group toggles
+  - max-case cap
+  - `Run Cohort Evaluation` button and status label
+- Added cohort resource artifacts:
+  - `Resources/Cohorts/cohort_schema_v1.json`
+  - `Resources/Cohorts/cohort_catalog_v1.json`
+  - `Resources/Cohorts/studies/example_cohort_v1.json`
+- Added export integration:
+  - cohort summary tables are included in the existing structured export bundle when present.
+
+## Current Phase 11B limitations
+- Batch execution is intentionally table-driven and conservative in this phase:
+  - scenario-based cases rely on existing in-scene scenario/comparison/feasibility tables.
+  - the module does not yet auto-replay full planning/evaluation from raw imaging assets per case.
+- Cohort comparisons are descriptive aggregates (mean/median/min/max), not inferential statistics.
+- Report-layer integration remains lightweight via shared table export paths.

@@ -1,15 +1,15 @@
 cmake_minimum_required(VERSION 3.20.6...3.22.6 FATAL_ERROR)
 
-project(SurgicalVIsion3D_Planner)
+project(SurgicalVision3D_Planner)
 
 #-----------------------------------------------------------------------------
 # Extension meta-information
-set(EXTENSION_HOMEPAGE "https://www.slicer.org/wiki/Documentation/Nightly/Extensions/SurgicalVIsion3D_Planner")
+set(EXTENSION_HOMEPAGE "https://www.slicer.org/wiki/Documentation/Nightly/Extensions/SurgicalVision3D_Planner")
 set(EXTENSION_CONTRIBUTORS "Juan Verde (Surgeon Scientist)")
-set(EXTENSION_DESCRIPTION "This is an example of a simple extension")
-set(EXTENSION_ICONURL "https://www.example.com/Slicer/Extensions/SurgicalVIsion3D_Planner.png")
-set(EXTENSION_SCREENSHOTURLS "https://www.example.com/Slicer/Extensions/SurgicalVIsion3D_Planner/Screenshots/1.png")
-set(EXTENSION_DEPENDS "NA") # Specified as a list or "NA" if no dependencies
+set(EXTENSION_DESCRIPTION "Phase 1 prototype for segmentation-based ablation probe planning and tumor margin evaluation.")
+set(EXTENSION_ICONURL "https://www.example.com/Slicer/Extensions/SurgicalVision3D_Planner.png")
+set(EXTENSION_SCREENSHOTURLS "https://www.example.com/Slicer/Extensions/SurgicalVision3D_Planner/Screenshots/1.png")
+set(EXTENSION_DEPENDS "ModelToModelDistance") # Specified as a list or "NA" if no dependencies
 
 #-----------------------------------------------------------------------------
 # Extension dependencies

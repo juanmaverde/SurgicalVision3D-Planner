@@ -107,3 +107,75 @@
 - Structure-priority weighting and clinical risk scoring.
 - Thermal/dose/perfusion modeling beyond geometric distance fields.
 - Collision-aware trajectory search and real-time drag updates.
+
+## Phase 6B multi-probe coordination, spacing rules, and no-touch constraints
+- Added explicit probe-coordination constraint settings in the parameter node:
+  - inter-probe distance min/max
+  - entry/target spacing minimums
+  - maximum parallel-angle threshold
+  - maximum overlap-redundancy threshold (conservative proxy)
+  - toggles for each rule, plus `requireAllProbePairsFeasible` and `enableNoTouchCheck`
+- Added deterministic pairwise probe-coordination evaluation based on trajectory centerlines:
+  - `InterProbeDistanceMm` is defined as the minimum distance between two trajectory line segments
+  - entry spacing, target spacing, and axis-angle metrics are computed per pair
+  - pair rows are deterministically ordered by `(ProbeAIndex, ProbeBIndex)`
+- Added plan-level aggregation outputs:
+  - feasible/infeasible pair counts
+  - aggregated failed rule names
+  - `CoordinationGatePass` and `CoordinationFailureSummary` for gating integration
+- Added conservative no-touch rule (optional):
+  - no-touch passes only if all probe entry points are outside the tumor closed surface
+- Added deterministic module-owned output tables:
+  - `SV3D Probe Coordination Constraint Settings`
+  - `SV3D Probe Pair Coordination Summary`
+  - `SV3D Probe Coordination Summary`
+  - `SV3D NoTouch Summary`
+- Workflow integration:
+  - explicit `Evaluate Probe Coordination` button added in the evaluation section
+  - coordination outputs are also refreshed from margin evaluation when endpoint pairs are valid
+  - stale coordination outputs are cleared on upstream geometry resets
+- Candidate-gating hook integration:
+  - coordination results publish `AllPairsFeasible`, `InfeasiblePairCount`, `NoTouchPass`, and `CoordinationGatePass`
+  - downstream candidate-feasibility layers can consume these fields without a separate filtering subsystem
+
+## Deferred after Phase 6B
+- Exact per-probe volumetric overlap intersection (current overlap is a conservative distance/length proxy).
+- Advanced no-touch strategy synthesis and trajectory auto-adjustment.
+- Automatic multi-probe optimization and procedural sequencing.
+
+## Phase 7A export package, reporting outputs, and reproducible plan bundle
+- Added export configuration state to the parameter node:
+  - export mode (`CurrentWorkingPlan`, `SelectedScenario`, `CurrentRecommendationContext`)
+  - selected scenario ID for export context
+  - export base name and last-used export directory/sequence
+  - include/exclude flags for table groups (trajectory, safety, coverage, feasibility, coordination, scenario/recommendation)
+- Added deterministic export engine helpers:
+  - deterministic bundle path builder using `<base>_<sequence>`
+  - table-node-to-dictionary serializer
+  - table-to-CSV export helper
+  - structured JSON export helper
+  - manifest builder and bundle export orchestrator
+- Added deterministic export bundle structure:
+  - `manifest.json`
+  - `plan_summary.json`
+  - `scenario_summary.json` when selected-scenario export is requested
+  - `tables/*.csv` for available summary tables
+  - `provenance/scenario_registry.json` and `provenance/recommendation_summary.json` when available
+- Added deterministic module-owned export preview outputs:
+  - `SV3D Export Summary`
+  - `SV3D Export Manifest Preview`
+- Added minimal export UI:
+  - export mode selector
+  - selected scenario ID field
+  - export base name and export directory fields
+  - include/exclude checkboxes for export categories
+  - `Export Bundle` button and status label
+- Export behavior is non-mutating:
+  - no geometry or plan-state mutation occurs during export
+  - optional outputs are exported only when source nodes exist
+  - repeated exports use incrementing sequence folders to avoid silent overwrite
+
+## Deferred after Phase 7A
+- Rich document reporting (PDF/slide generation).
+- External upload/sync or database export integrations.
+- Styled human-facing report composition beyond structured JSON/CSV bundles.

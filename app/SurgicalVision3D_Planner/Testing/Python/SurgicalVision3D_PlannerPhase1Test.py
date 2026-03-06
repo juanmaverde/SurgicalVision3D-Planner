@@ -1,3 +1,7 @@
+import json
+import tempfile
+from pathlib import Path
+
 import numpy as np
 import vtk
 
@@ -30,6 +34,17 @@ class SurgicalVision3D_PlannerPhase1Test(ScriptedLoadableModuleTest):
         self.test_repeated_merge_reuses_combined_output()
         self.test_summary_table_outputs_are_reused_deterministically()
         self.test_structure_safety_tables_are_reused_deterministically()
+        self.test_probe_coordination_pairwise_metrics()
+        self.test_probe_coordination_plan_aggregation_and_gate_flags()
+        self.test_no_touch_entry_outside_tumor_rule()
+        self.test_probe_coordination_tables_are_reused_deterministically()
+        self.test_export_manifest_creation_from_synthetic_state()
+        self.test_export_bundle_path_generation()
+        self.test_table_node_to_dict_serialization()
+        self.test_csv_and_json_export_helpers()
+        self.test_selected_scenario_export_mode()
+        self.test_export_bundle_handles_missing_optional_outputs()
+        self.test_repeated_export_sequence_behavior()
         self.test_recolor_restore_uses_full_array_length()
         self.test_parameter_node_restore_round_trip()
 
@@ -413,6 +428,380 @@ class SurgicalVision3D_PlannerPhase1Test(ScriptedLoadableModuleTest):
         logic.populateStructureSafetyThresholdSummaryTable(reusedThresholdTable, [])
         self.assertEqual(logic.tableNodeRowCount(reusedSummaryTable), 0)
         self.assertEqual(logic.tableNodeRowCount(reusedThresholdTable), 0)
+
+    def test_probe_coordination_pairwise_metrics(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        trajectories = planner.SurgicalVision3D_PlannerLogic.extractTrajectoriesFromPointPairs(
+            [
+                (0.0, 0.0, 0.0),
+                (0.0, 0.0, -10.0),
+                (10.0, 0.0, 0.0),
+                (10.0, 0.0, -10.0),
+                (0.0, 0.0, 0.0),
+                (0.0, 10.0, 0.0),
+            ],
+            strictEven=True,
+        )
+        settings = planner.ProbeCoordinationConstraintSettings(
+            minInterProbeDistanceMm=1.0,
+            maxInterProbeDistanceMm=200.0,
+            minEntryPointSpacingMm=1.0,
+            minTargetPointSpacingMm=1.0,
+            enableAngleRule=True,
+            maxParallelAngleDeg=5.0,
+        )
+
+        pairRowParallel = logic.evaluateProbePairCoordination(trajectories[0], trajectories[1], settings)
+        self.assertAlmostEqual(float(pairRowParallel["InterProbeDistanceMm"]), 10.0, places=6)
+        self.assertAlmostEqual(float(pairRowParallel["EntryPointSpacingMm"]), 10.0, places=6)
+        self.assertAlmostEqual(float(pairRowParallel["TargetPointSpacingMm"]), 10.0, places=6)
+        self.assertAlmostEqual(float(pairRowParallel["ProbeAxisAngleDeg"]), 0.0, places=6)
+        self.assertIn("ProbeAxesTooParallel", str(pairRowParallel["FailedConstraintNames"]))
+
+        pairRowOrthogonal = logic.evaluateProbePairCoordination(trajectories[0], trajectories[2], settings)
+        self.assertAlmostEqual(float(pairRowOrthogonal["ProbeAxisAngleDeg"]), 90.0, places=6)
+        self.assertNotIn("ProbeAxesTooParallel", str(pairRowOrthogonal["FailedConstraintNames"]))
+
+    def test_probe_coordination_plan_aggregation_and_gate_flags(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        trajectories = planner.SurgicalVision3D_PlannerLogic.extractTrajectoriesFromPointPairs(
+            [
+                (0.0, 0.0, 0.0),
+                (0.0, 0.0, -10.0),
+                (10.0, 0.0, 0.0),
+                (10.0, 0.0, -10.0),
+                (30.0, 0.0, 0.0),
+                (30.0, 0.0, -10.0),
+            ],
+            strictEven=True,
+        )
+        settings = planner.ProbeCoordinationConstraintSettings(
+            minInterProbeDistanceMm=12.0,
+            maxInterProbeDistanceMm=200.0,
+            minEntryPointSpacingMm=0.0,
+            minTargetPointSpacingMm=0.0,
+            enableEntrySpacingRule=False,
+            enableTargetSpacingRule=False,
+            enableAngleRule=False,
+            enableOverlapRule=False,
+            requireAllProbePairsFeasible=True,
+        )
+
+        pairRows, planSummary, noTouchSummary = logic.evaluatePlanProbeCoordination(trajectories, settings, None)
+        self.assertEqual(len(pairRows), 3)
+        self.assertEqual([(int(row["ProbeAIndex"]), int(row["ProbeBIndex"])) for row in pairRows], [(1, 2), (1, 3), (2, 3)])
+        self.assertEqual(int(planSummary["PairCount"]), 3)
+        self.assertEqual(int(planSummary["InfeasiblePairCount"]), 1)
+        self.assertFalse(bool(planSummary["AllPairsFeasible"]))
+        self.assertFalse(bool(planSummary["CoordinationGatePass"]))
+        self.assertIn("ProbePairCoordinationFailed", str(planSummary["CoordinationFailureSummary"]))
+        self.assertFalse(bool(noTouchSummary["NoTouchChecked"]))
+
+        settings.requireAllProbePairsFeasible = False
+        _, relaxedPlanSummary, _ = logic.evaluatePlanProbeCoordination(trajectories, settings, None)
+        self.assertTrue(bool(relaxedPlanSummary["CoordinationGatePass"]))
+        self.assertEqual(str(relaxedPlanSummary["CoordinationFailureSummary"]), "")
+
+    def test_no_touch_entry_outside_tumor_rule(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        tumorSegmentation = self._createSphereSegmentation("NoTouchTumor", center=(0.0, 0.0, 0.0))
+        trajectories = planner.SurgicalVision3D_PlannerLogic.extractTrajectoriesFromPointPairs(
+            [
+                (10.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+                (0.0, 0.0, -10.0),
+            ],
+            strictEven=True,
+        )
+
+        noTouchSummary = logic.evaluateNoTouchArrangement(trajectories, tumorSegmentation)
+        self.assertTrue(bool(noTouchSummary["NoTouchChecked"]))
+        self.assertFalse(bool(noTouchSummary["NoTouchPass"]))
+        self.assertEqual(int(noTouchSummary["EntryPointsInsideTumorCount"]), 1)
+        self.assertEqual(str(noTouchSummary["FailedTrajectoryIndices"]), "2")
+
+        settings = planner.ProbeCoordinationConstraintSettings(
+            enableNoTouchCheck=True,
+            requireAllProbePairsFeasible=False,
+            enableInterProbeDistanceRule=False,
+            enableEntrySpacingRule=False,
+            enableTargetSpacingRule=False,
+            enableAngleRule=False,
+            enableOverlapRule=False,
+        )
+        _, planSummary, _ = logic.evaluatePlanProbeCoordination(trajectories, settings, tumorSegmentation)
+        self.assertFalse(bool(planSummary["NoTouchPass"]))
+        self.assertFalse(bool(planSummary["CoordinationGatePass"]))
+        self.assertIn("NoTouchCheckFailed", str(planSummary["CoordinationFailureSummary"]))
+
+    def test_probe_coordination_tables_are_reused_deterministically(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        settings = planner.ProbeCoordinationConstraintSettings(enableNoTouchCheck=True, enableAngleRule=True)
+        pairRows = [
+            {
+                "ProbeAIndex": 1,
+                "ProbeBIndex": 2,
+                "IsFeasible": False,
+                "FailedConstraintCount": 2,
+                "FailedConstraintNames": "EntryPointSpacingBelowMin;ProbeAxesTooParallel",
+                "InterProbeDistanceMm": 4.0,
+                "EntryPointSpacingMm": 2.0,
+                "TargetPointSpacingMm": 2.0,
+                "ProbeAxisAngleDeg": 1.5,
+                "OverlapRedundancyPercent": 82.0,
+            }
+        ]
+        planSummary = {
+            "ScenarioOrPlanName": "CurrentPlan",
+            "ProbeCount": 2,
+            "PairCount": 1,
+            "FeasiblePairCount": 0,
+            "InfeasiblePairCount": 1,
+            "AllPairsFeasible": False,
+            "AggregatedFailedConstraintNames": "EntryPointSpacingBelowMin;ProbeAxesTooParallel",
+            "NoTouchPass": False,
+            "CoordinationGatePass": False,
+            "CoordinationFailureSummary": "ProbePairCoordinationFailed;NoTouchCheckFailed",
+        }
+        noTouchSummary = {
+            "NoTouchChecked": True,
+            "NoTouchPass": False,
+            "Reason": "Entry point is inside tumor for one or more trajectories.",
+            "EntryPointsInsideTumorCount": 1,
+            "FailedTrajectoryIndices": "2",
+        }
+
+        settingsTable = logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            planner.PROBE_COORDINATION_SETTINGS_TABLE_NODE_NAME,
+            planner.GENERATED_PROBE_COORDINATION_SETTINGS_TABLE_ATTRIBUTE,
+        )
+        pairTable = logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            planner.PROBE_PAIR_COORDINATION_TABLE_NODE_NAME,
+            planner.GENERATED_PROBE_PAIR_COORDINATION_TABLE_ATTRIBUTE,
+        )
+        planTable = logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            planner.PROBE_COORDINATION_SUMMARY_TABLE_NODE_NAME,
+            planner.GENERATED_PROBE_COORDINATION_SUMMARY_TABLE_ATTRIBUTE,
+        )
+        noTouchTable = logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            planner.NO_TOUCH_SUMMARY_TABLE_NODE_NAME,
+            planner.GENERATED_NO_TOUCH_SUMMARY_TABLE_ATTRIBUTE,
+        )
+
+        logic.populateProbeCoordinationConstraintSettingsTable(settingsTable, settings)
+        logic.populateProbePairCoordinationSummaryTable(pairTable, pairRows)
+        logic.populateProbeCoordinationSummaryTable(planTable, planSummary)
+        logic.populateNoTouchSummaryTable(noTouchTable, noTouchSummary)
+        self.assertEqual(logic.tableNodeRowCount(settingsTable), 13)
+        self.assertEqual(logic.tableNodeRowCount(pairTable), 1)
+        self.assertEqual(logic.tableNodeRowCount(planTable), 1)
+        self.assertEqual(logic.tableNodeRowCount(noTouchTable), 1)
+
+        reusedSettingsTable = logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            planner.PROBE_COORDINATION_SETTINGS_TABLE_NODE_NAME,
+            planner.GENERATED_PROBE_COORDINATION_SETTINGS_TABLE_ATTRIBUTE,
+            settingsTable,
+        )
+        reusedPairTable = logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            planner.PROBE_PAIR_COORDINATION_TABLE_NODE_NAME,
+            planner.GENERATED_PROBE_PAIR_COORDINATION_TABLE_ATTRIBUTE,
+            pairTable,
+        )
+        reusedPlanTable = logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            planner.PROBE_COORDINATION_SUMMARY_TABLE_NODE_NAME,
+            planner.GENERATED_PROBE_COORDINATION_SUMMARY_TABLE_ATTRIBUTE,
+            planTable,
+        )
+        reusedNoTouchTable = logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            planner.NO_TOUCH_SUMMARY_TABLE_NODE_NAME,
+            planner.GENERATED_NO_TOUCH_SUMMARY_TABLE_ATTRIBUTE,
+            noTouchTable,
+        )
+        self.assertEqual(reusedSettingsTable.GetID(), settingsTable.GetID())
+        self.assertEqual(reusedPairTable.GetID(), pairTable.GetID())
+        self.assertEqual(reusedPlanTable.GetID(), planTable.GetID())
+        self.assertEqual(reusedNoTouchTable.GetID(), noTouchTable.GetID())
+
+        logic.populateProbePairCoordinationSummaryTable(reusedPairTable, [])
+        self.assertEqual(logic.tableNodeRowCount(reusedPairTable), 0)
+
+        ownedPairTables = [
+            node
+            for node in slicer.util.getNodesByClass("vtkMRMLTableNode")
+            if node.GetAttribute(planner.GENERATED_PROBE_PAIR_COORDINATION_TABLE_ATTRIBUTE) == "1"
+        ]
+        self.assertEqual(len(ownedPairTables), 1)
+
+    def test_export_manifest_creation_from_synthetic_state(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        parameterNode = logic.getParameterNode()
+        exportConfig = planner.PlanExportConfig(
+            exportMode="CurrentWorkingPlan",
+            exportBaseName="Trial Export",
+            includeTrajectoryTables=True,
+            includeSafetyTables=True,
+            includeCoordinationTables=True,
+        )
+
+        manifest = logic.buildPlanExportManifest(
+            parameterNode=parameterNode,
+            exportConfig=exportConfig,
+            exportSequence=7,
+            filesExported=["manifest.json", "plan_summary.json", "tables/trajectory_summary.csv"],
+            selectedScenarioSummary={"ScenarioName": "Scenario Alpha"},
+        )
+        self.assertEqual(manifest.exportId, "SV3D-Export-0007")
+        self.assertEqual(manifest.exportMode, "CurrentWorkingPlan")
+        self.assertEqual(manifest.exportBaseName, "Trial Export")
+        self.assertEqual(manifest.selectedScenarioName, "Scenario Alpha")
+        self.assertEqual(manifest.filesExported[0], "manifest.json")
+
+    def test_export_bundle_path_generation(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        bundlePath = logic.buildDeterministicBundlePath("C:/tmp/SV3D", "My Export", 12)
+        self.assertEqual(bundlePath.name, "My_Export_0012")
+
+    def test_table_node_to_dict_serialization(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        tableNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTableNode", "ExportSerializationTable")
+        planSummary = {
+            "TrajectoryCount": 3,
+            "TumorSegmentID": "TumorSegment_01",
+            "TumorSegmentName": "Tumor A",
+            "MinSignedMarginMm": -1.0,
+            "MeanSignedMarginMm": 2.0,
+            "MedianSignedMarginMm": 1.0,
+            "P20SignedMarginMm": 0.1,
+            "P80SignedMarginMm": 4.0,
+        }
+        logic.populatePlanSummaryTable(tableNode, planSummary)
+
+        rows = logic._tableNodeToDictionaries(tableNode)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["Trajectory Count"], "3")
+        self.assertEqual(rows[0]["Tumor Segment ID"], "TumorSegment_01")
+
+    def test_csv_and_json_export_helpers(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        outputRoot = Path(tempfile.mkdtemp(prefix="sv3d_export_test_"))
+        try:
+            tableNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTableNode", "ExportCsvTable")
+            thresholdSummary = [
+                {"Bucket": "< 0 mm", "Count": 2, "Percent": 50.0},
+                {"Bucket": ">= 5 mm", "Count": 2, "Percent": 50.0},
+            ]
+            logic.populateMarginThresholdSummaryTable(tableNode, thresholdSummary)
+
+            csvPath = outputRoot / "tables" / "threshold.csv"
+            logic.exportTableNodeToCsv(tableNode, csvPath)
+            self.assertTrue(csvPath.exists())
+            csvLines = csvPath.read_text(encoding="utf-8").splitlines()
+            self.assertGreaterEqual(len(csvLines), 2)
+            self.assertIn("Margin Bucket", csvLines[0])
+
+            jsonPath = outputRoot / "manifest.json"
+            jsonPayload = {"ExportMode": "CurrentWorkingPlan", "FileCount": 2}
+            logic.exportStructuredSummaryToJson(jsonPath, jsonPayload)
+            self.assertTrue(jsonPath.exists())
+            loadedPayload = json.loads(jsonPath.read_text(encoding="utf-8"))
+            self.assertEqual(loadedPayload["ExportMode"], "CurrentWorkingPlan")
+            self.assertEqual(int(loadedPayload["FileCount"]), 2)
+        finally:
+            for exportedPath in sorted(outputRoot.rglob("*"), reverse=True):
+                if exportedPath.is_file():
+                    exportedPath.unlink()
+                elif exportedPath.is_dir():
+                    exportedPath.rmdir()
+            if outputRoot.exists():
+                outputRoot.rmdir()
+
+    def test_selected_scenario_export_mode(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        scenarioRegistryTable = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTableNode", "SV3D Scenario Registry")
+        logic._addStringColumn(scenarioRegistryTable, "ScenarioID", ["S001", "S002"])
+        logic._addStringColumn(scenarioRegistryTable, "ScenarioName", ["Baseline", "CandidateA"])
+
+        summary = logic.collectScenarioExportData("S002")
+        self.assertEqual(summary["SelectedScenarioID"], "S002")
+        self.assertEqual(summary["ScenarioName"], "CandidateA")
+        self.assertEqual(summary["Source"], "SV3D Scenario Registry")
+
+    def test_export_bundle_handles_missing_optional_outputs(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        parameterNode = logic.getParameterNode()
+        exportRoot = Path(tempfile.mkdtemp(prefix="sv3d_bundle_optional_"))
+        try:
+            exportConfig = planner.PlanExportConfig(
+                exportMode="CurrentWorkingPlan",
+                exportBaseName="Phase7A",
+                exportDirectory=str(exportRoot),
+                includeWorkingPlan=True,
+                includeSelectedScenario=False,
+                includeScenarioComparison=True,
+                includeRecommendationOutputs=True,
+                includeTrajectoryTables=True,
+                includeSafetyTables=True,
+                includeCoverageTables=True,
+                includeFeasibilityTables=True,
+                includeCoordinationTables=True,
+                lastExportSequence=0,
+            )
+            exportResult = logic.exportPlanBundle(parameterNode, exportConfig)
+            bundlePath = Path(exportResult["bundlePath"])
+            self.assertTrue((bundlePath / "manifest.json").exists())
+            self.assertTrue((bundlePath / "plan_summary.json").exists())
+            self.assertGreaterEqual(int(exportResult["fileCount"]), 2)
+        finally:
+            for exportedPath in sorted(exportRoot.rglob("*"), reverse=True):
+                if exportedPath.is_file():
+                    exportedPath.unlink()
+                elif exportedPath.is_dir():
+                    exportedPath.rmdir()
+            if exportRoot.exists():
+                exportRoot.rmdir()
+
+    def test_repeated_export_sequence_behavior(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        parameterNode = logic.getParameterNode()
+        exportRoot = Path(tempfile.mkdtemp(prefix="sv3d_bundle_sequence_"))
+        try:
+            firstConfig = planner.PlanExportConfig(
+                exportMode="CurrentWorkingPlan",
+                exportBaseName="SequenceCheck",
+                exportDirectory=str(exportRoot),
+                lastExportSequence=0,
+            )
+            firstResult = logic.exportPlanBundle(parameterNode, firstConfig)
+            secondConfig = planner.PlanExportConfig(
+                exportMode="CurrentWorkingPlan",
+                exportBaseName="SequenceCheck",
+                exportDirectory=str(exportRoot),
+                lastExportSequence=int(firstResult["exportSequence"]),
+            )
+            secondResult = logic.exportPlanBundle(parameterNode, secondConfig)
+
+            firstBundleName = Path(firstResult["bundlePath"]).name
+            secondBundleName = Path(secondResult["bundlePath"]).name
+            self.assertEqual(firstBundleName, "SequenceCheck_0001")
+            self.assertEqual(secondBundleName, "SequenceCheck_0002")
+            self.assertNotEqual(firstBundleName, secondBundleName)
+        finally:
+            for exportedPath in sorted(exportRoot.rglob("*"), reverse=True):
+                if exportedPath.is_file():
+                    exportedPath.unlink()
+                elif exportedPath.is_dir():
+                    exportedPath.rmdir()
+            if exportRoot.exists():
+                exportRoot.rmdir()
 
     def test_recolor_restore_uses_full_array_length(self):
         signedDistances = vtk.vtkDoubleArray()

@@ -1,10 +1,13 @@
 ﻿from __future__ import annotations
 
+import csv
 import json
 import logging
 import math
-from dataclasses import dataclass
-from typing import Sequence
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Sequence
 
 import numpy as np
 import vtk
@@ -40,6 +43,12 @@ GENERATED_PLAN_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedPlan
 GENERATED_MARGIN_THRESHOLD_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedMarginThresholdSummaryTable"
 GENERATED_STRUCTURE_SAFETY_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedStructureSafetySummaryTable"
 GENERATED_STRUCTURE_SAFETY_THRESHOLD_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedStructureSafetyThresholdSummaryTable"
+GENERATED_PROBE_COORDINATION_SETTINGS_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedProbeCoordinationSettingsTable"
+GENERATED_PROBE_PAIR_COORDINATION_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedProbePairCoordinationTable"
+GENERATED_PROBE_COORDINATION_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedProbeCoordinationSummaryTable"
+GENERATED_NO_TOUCH_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedNoTouchSummaryTable"
+GENERATED_EXPORT_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedExportSummaryTable"
+GENERATED_EXPORT_MANIFEST_PREVIEW_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedExportManifestPreviewTable"
 TEMP_PROBE_MARGIN_INPUT_ATTRIBUTE = "SurgicalVision3D_Planner.TempProbeMarginInput"
 TEMP_TUMOR_MARGIN_INPUT_ATTRIBUTE = "SurgicalVision3D_Planner.TempTumorMarginInput"
 TEMP_PROBE_SAFETY_INPUT_ATTRIBUTE = "SurgicalVision3D_Planner.TempProbeSafetyInput"
@@ -58,6 +67,12 @@ PLAN_SUMMARY_TABLE_NODE_NAME = "SV3D Plan Summary"
 MARGIN_THRESHOLD_SUMMARY_TABLE_NODE_NAME = "SV3D Margin Threshold Summary"
 STRUCTURE_SAFETY_SUMMARY_TABLE_NODE_NAME = "SV3D Structure Safety Summary"
 STRUCTURE_SAFETY_THRESHOLD_SUMMARY_TABLE_NODE_NAME = "SV3D Structure Safety Threshold Summary"
+PROBE_COORDINATION_SETTINGS_TABLE_NODE_NAME = "SV3D Probe Coordination Constraint Settings"
+PROBE_PAIR_COORDINATION_TABLE_NODE_NAME = "SV3D Probe Pair Coordination Summary"
+PROBE_COORDINATION_SUMMARY_TABLE_NODE_NAME = "SV3D Probe Coordination Summary"
+NO_TOUCH_SUMMARY_TABLE_NODE_NAME = "SV3D NoTouch Summary"
+EXPORT_SUMMARY_TABLE_NODE_NAME = "SV3D Export Summary"
+EXPORT_MANIFEST_PREVIEW_TABLE_NODE_NAME = "SV3D Export Manifest Preview"
 TEMP_PROBE_SAFETY_MODEL_NODE_NAME = "SV3D Temp Probe Safety Input"
 TEMP_STRUCTURE_SAFETY_MODEL_NODE_NAME = "SV3D Temp Structure Safety Input"
 TEMP_STRUCTURE_SAFETY_DISTANCE_MODEL_NODE_NAME = "SV3D Temp Structure Safety Distance"
@@ -125,6 +140,60 @@ class ProbeTrajectory:
     sourceControlPointIndices: tuple[int, int] | None = None
 
 
+@dataclass
+class ProbeCoordinationConstraintSettings:
+    minInterProbeDistanceMm: float = 5.0
+    maxInterProbeDistanceMm: float = 120.0
+    minEntryPointSpacingMm: float = 5.0
+    minTargetPointSpacingMm: float = 3.0
+    maxParallelAngleDeg: float = 10.0
+    maxAllowedOverlapPercentBetweenPerProbeVolumes: float = 80.0
+    enableNoTouchCheck: bool = False
+    requireAllProbePairsFeasible: bool = True
+    enableInterProbeDistanceRule: bool = True
+    enableEntrySpacingRule: bool = True
+    enableTargetSpacingRule: bool = True
+    enableAngleRule: bool = False
+    enableOverlapRule: bool = False
+
+
+@dataclass
+class PlanExportConfig:
+    exportMode: str = "CurrentWorkingPlan"
+    selectedExportScenarioID: str = ""
+    exportBaseName: str = "SV3D_Export"
+    exportDirectory: str = ""
+    lastExportSequence: int = 0
+    includeWorkingPlan: bool = True
+    includeSelectedScenario: bool = False
+    includeScenarioComparison: bool = True
+    includeRecommendationOutputs: bool = True
+    includeTrajectoryTables: bool = True
+    includeSafetyTables: bool = True
+    includeCoverageTables: bool = True
+    includeFeasibilityTables: bool = True
+    includeCoordinationTables: bool = True
+
+
+@dataclass
+class PlanExportManifest:
+    exportId: str
+    exportTimestampISO: str
+    exportSequence: int
+    exportMode: str
+    exportBaseName: str
+    selectedScenarioID: str
+    selectedScenarioName: str
+    profileSourceMode: str
+    presetID: str
+    presetName: str
+    targetSegmentID: str
+    targetSegmentName: str
+    filesExported: list[str]
+    includeFlags: dict[str, bool]
+    notes: str = ""
+
+
 #
 # SurgicalVision3D_Planner
 #
@@ -175,12 +244,45 @@ class SurgicalVision3D_PlannerParameterNode:
     marginThresholdSummaryTable: vtkMRMLTableNode | None = None
     structureSafetySummaryTable: vtkMRMLTableNode | None = None
     structureSafetyThresholdSummaryTable: vtkMRMLTableNode | None = None
+    probeCoordinationConstraintSettingsTable: vtkMRMLTableNode | None = None
+    probePairCoordinationSummaryTable: vtkMRMLTableNode | None = None
+    probeCoordinationSummaryTable: vtkMRMLTableNode | None = None
+    noTouchSummaryTable: vtkMRMLTableNode | None = None
+    exportSummaryTable: vtkMRMLTableNode | None = None
+    exportManifestPreviewTable: vtkMRMLTableNode | None = None
 
     createTrajectoryLinesOnPlacement: bool = True
     clearPreviousGeneratedProbes: bool = True
     recolorThresholdLow: float = -10.0
     recolorThresholdMid: float = -5.0
     recolorThresholdHigh: float = -2.0
+    minInterProbeDistanceMm: float = 5.0
+    maxInterProbeDistanceMm: float = 120.0
+    minEntryPointSpacingMm: float = 5.0
+    minTargetPointSpacingMm: float = 3.0
+    maxParallelAngleDeg: float = 10.0
+    maxAllowedOverlapPercentBetweenPerProbeVolumes: float = 80.0
+    enableNoTouchCheck: bool = False
+    requireAllProbePairsFeasible: bool = True
+    enableInterProbeDistanceRule: bool = True
+    enableEntrySpacingRule: bool = True
+    enableTargetSpacingRule: bool = True
+    enableAngleRule: bool = False
+    enableOverlapRule: bool = False
+    exportMode: str = "CurrentWorkingPlan"
+    selectedExportScenarioID: str = ""
+    exportBaseName: str = "SV3D_Export"
+    lastExportDirectory: str = ""
+    lastExportSequence: int = 0
+    includeWorkingPlan: bool = True
+    includeSelectedScenario: bool = False
+    includeScenarioComparison: bool = True
+    includeRecommendationOutputs: bool = True
+    includeTrajectoryTables: bool = True
+    includeSafetyTables: bool = True
+    includeCoverageTables: bool = True
+    includeFeasibilityTables: bool = True
+    includeCoordinationTables: bool = True
 
     generatedProbeNodeIDs: str = "[]"
     generatedTrajectoryLineIDs: str = "[]"
@@ -240,6 +342,8 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         self.ui.evaluateMarginsButton.connect("clicked(bool)", self.onEvaluateMarginsButton)
         self.ui.recolorMarginsButton.connect("clicked(bool)", self.onRecolorMarginsButton)
         self.ui.resetMarginColorsButton.connect("clicked(bool)", self.onResetMarginColorsButton)
+        self.ui.evaluateProbeCoordinationButton.connect("clicked(bool)", self.onEvaluateProbeCoordinationButton)
+        self.ui.exportBundleButton.connect("clicked(bool)", self.onExportBundleButton)
         self.ui.riskStructuresSegmentationSelector.connect(
             "currentNodeChanged(vtkMRMLNode*)",
             self.onRiskStructuresSegmentationChanged,
@@ -283,7 +387,24 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         if self._parameterNode:
             self._parameterNodeGuiTag = self._parameterNode.connectGui(self.ui)
             self.addObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._updateButtonStates)
+            self._syncExportWidgetsFromParameterNode()
             self._updateButtonStates()
+
+    def _syncExportWidgetsFromParameterNode(self) -> None:
+        if not self._parameterNode:
+            return
+
+        if hasattr(self.ui, "exportModeComboBox"):
+            currentModeText = str(self._parameterNode.exportMode or "CurrentWorkingPlan")
+            modeIndex = self.ui.exportModeComboBox.findText(currentModeText)
+            if modeIndex >= 0:
+                self.ui.exportModeComboBox.currentIndex = modeIndex
+        if hasattr(self.ui, "selectedExportScenarioIDLineEdit"):
+            self.ui.selectedExportScenarioIDLineEdit.text = str(self._parameterNode.selectedExportScenarioID or "")
+        if hasattr(self.ui, "exportBaseNameLineEdit"):
+            self.ui.exportBaseNameLineEdit.text = str(self._parameterNode.exportBaseName or "")
+        if hasattr(self.ui, "exportDirectoryLineEdit"):
+            self.ui.exportDirectoryLineEdit.text = str(self._parameterNode.lastExportDirectory or "")
 
     def _reconcileParameterNodeState(self) -> None:
         if not self.logic or not self._parameterNode:
@@ -309,6 +430,12 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             "marginThresholdSummaryTable",
             "structureSafetySummaryTable",
             "structureSafetyThresholdSummaryTable",
+            "probeCoordinationConstraintSettingsTable",
+            "probePairCoordinationSummaryTable",
+            "probeCoordinationSummaryTable",
+            "noTouchSummaryTable",
+            "exportSummaryTable",
+            "exportManifestPreviewTable",
         ):
             node = getattr(self._parameterNode, nodeFieldName)
             if node and not slicer.mrmlScene.IsNodePresent(node):
@@ -328,6 +455,50 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             GENERATED_STRUCTURE_SAFETY_THRESHOLD_TABLE_ATTRIBUTE,
         ) or clearReferences:
             self._parameterNode.structureSafetyThresholdSummaryTable = None
+
+    def _clearOwnedCoordinationOutputs(self, clearReferences: bool = False) -> None:
+        if not self.logic or not self._parameterNode:
+            return
+
+        if self.logic.removeNodeIfOwned(
+            self._parameterNode.probeCoordinationConstraintSettingsTable,
+            GENERATED_PROBE_COORDINATION_SETTINGS_TABLE_ATTRIBUTE,
+        ) or clearReferences:
+            self._parameterNode.probeCoordinationConstraintSettingsTable = None
+        if self.logic.removeNodeIfOwned(
+            self._parameterNode.probePairCoordinationSummaryTable,
+            GENERATED_PROBE_PAIR_COORDINATION_TABLE_ATTRIBUTE,
+        ) or clearReferences:
+            self._parameterNode.probePairCoordinationSummaryTable = None
+        if self.logic.removeNodeIfOwned(
+            self._parameterNode.probeCoordinationSummaryTable,
+            GENERATED_PROBE_COORDINATION_SUMMARY_TABLE_ATTRIBUTE,
+        ) or clearReferences:
+            self._parameterNode.probeCoordinationSummaryTable = None
+        if self.logic.removeNodeIfOwned(
+            self._parameterNode.noTouchSummaryTable,
+            GENERATED_NO_TOUCH_SUMMARY_TABLE_ATTRIBUTE,
+        ) or clearReferences:
+            self._parameterNode.noTouchSummaryTable = None
+        if clearReferences and hasattr(self.ui, "probeCoordinationStatusLabel"):
+            self.ui.probeCoordinationStatusLabel.text = "Probe coordination not evaluated."
+
+    def _clearOwnedExportOutputs(self, clearReferences: bool = False) -> None:
+        if not self.logic or not self._parameterNode:
+            return
+
+        if self.logic.removeNodeIfOwned(
+            self._parameterNode.exportSummaryTable,
+            GENERATED_EXPORT_SUMMARY_TABLE_ATTRIBUTE,
+        ) or clearReferences:
+            self._parameterNode.exportSummaryTable = None
+        if self.logic.removeNodeIfOwned(
+            self._parameterNode.exportManifestPreviewTable,
+            GENERATED_EXPORT_MANIFEST_PREVIEW_TABLE_ATTRIBUTE,
+        ) or clearReferences:
+            self._parameterNode.exportManifestPreviewTable = None
+        if clearReferences and hasattr(self.ui, "exportStatusLabel"):
+            self.ui.exportStatusLabel.text = "No export run yet."
 
     def _clearOwnedDerivedOutputs(self, clearReferences: bool = False) -> None:
         if not self.logic or not self._parameterNode:
@@ -352,6 +523,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         ) or clearReferences:
             self._parameterNode.marginThresholdSummaryTable = None
         self._clearOwnedSafetyOutputs(clearReferences=clearReferences)
+        self._clearOwnedCoordinationOutputs(clearReferences=clearReferences)
 
     def _updateButtonStates(self, caller=None, event=None) -> None:
         if not self._parameterNode:
@@ -364,6 +536,8 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 "evaluateMarginsButton",
                 "recolorMarginsButton",
                 "resetMarginColorsButton",
+                "evaluateProbeCoordinationButton",
+                "exportBundleButton",
             ):
                 getattr(self.ui, buttonName).enabled = False
             return
@@ -378,6 +552,8 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         hasRegistrationInputs = bool(self._parameterNode.tumorSegmentation and self._parameterNode.nativeFiducials and self._parameterNode.registeredFiducials)
         hasMarginModel = self._parameterNode.outputMarginModel is not None
         hasTumorTransform = bool(self._parameterNode.tumorSegmentation and self._parameterNode.tumorSegmentation.GetTransformNodeID())
+        endpointControlPointCount = int(self._parameterNode.endpointsMarkups.GetNumberOfControlPoints()) if self._parameterNode.endpointsMarkups else 0
+        hasEvenEndpointPairs = endpointControlPointCount >= 2 and endpointControlPointCount % 2 == 0
 
         self.ui.placeProbesButton.enabled = hasProbeAndEndpoints
         self.ui.createTrajectoryLinesButton.enabled = self._parameterNode.endpointsMarkups is not None
@@ -387,6 +563,20 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         self.ui.evaluateMarginsButton.enabled = hasTumor and (hasCombinedProbe or hasGeneratedProbes)
         self.ui.recolorMarginsButton.enabled = hasMarginModel
         self.ui.resetMarginColorsButton.enabled = hasMarginModel
+        self.ui.evaluateProbeCoordinationButton.enabled = hasEvenEndpointPairs
+        exportModeText = str(self.ui.exportModeComboBox.currentText) if hasattr(self.ui, "exportModeComboBox") else str(self._parameterNode.exportMode)
+        scenarioRequired = exportModeText == "SelectedScenario"
+        selectedScenarioID = (
+            str(self.ui.selectedExportScenarioIDLineEdit.text)
+            if hasattr(self.ui, "selectedExportScenarioIDLineEdit")
+            else str(self._parameterNode.selectedExportScenarioID)
+        )
+        exportBaseName = (
+            str(self.ui.exportBaseNameLineEdit.text)
+            if hasattr(self.ui, "exportBaseNameLineEdit")
+            else str(self._parameterNode.exportBaseName)
+        )
+        self.ui.exportBundleButton.enabled = bool(exportBaseName.strip()) and (not scenarioRequired or bool(selectedScenarioID.strip()))
 
     def onPlaceProbesButton(self) -> None:
         with slicer.util.tryWithErrorDisplay(_("Failed to place probes."), waitCursor=True):
@@ -482,6 +672,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 GENERATED_MARGIN_THRESHOLD_TABLE_ATTRIBUTE,
             )
             self._clearOwnedSafetyOutputs(clearReferences=True)
+            self._clearOwnedCoordinationOutputs(clearReferences=True)
             self._parameterNode.outputMarginModel = None
             self._parameterNode.resultTable = None
             self._parameterNode.planSummaryTable = None
@@ -514,6 +705,99 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
 
         self._clearOwnedSafetyOutputs(clearReferences=True)
         self._updateButtonStates()
+
+    def _buildProbeCoordinationConstraintSettings(self) -> ProbeCoordinationConstraintSettings:
+        if not self._parameterNode:
+            return ProbeCoordinationConstraintSettings()
+        return ProbeCoordinationConstraintSettings(
+            minInterProbeDistanceMm=float(self._parameterNode.minInterProbeDistanceMm),
+            maxInterProbeDistanceMm=float(self._parameterNode.maxInterProbeDistanceMm),
+            minEntryPointSpacingMm=float(self._parameterNode.minEntryPointSpacingMm),
+            minTargetPointSpacingMm=float(self._parameterNode.minTargetPointSpacingMm),
+            maxParallelAngleDeg=float(self._parameterNode.maxParallelAngleDeg),
+            maxAllowedOverlapPercentBetweenPerProbeVolumes=float(
+                self._parameterNode.maxAllowedOverlapPercentBetweenPerProbeVolumes
+            ),
+            enableNoTouchCheck=bool(self._parameterNode.enableNoTouchCheck),
+            requireAllProbePairsFeasible=bool(self._parameterNode.requireAllProbePairsFeasible),
+            enableInterProbeDistanceRule=bool(self._parameterNode.enableInterProbeDistanceRule),
+            enableEntrySpacingRule=bool(self._parameterNode.enableEntrySpacingRule),
+            enableTargetSpacingRule=bool(self._parameterNode.enableTargetSpacingRule),
+            enableAngleRule=bool(self._parameterNode.enableAngleRule),
+            enableOverlapRule=bool(self._parameterNode.enableOverlapRule),
+        )
+
+    def _evaluateAndPublishProbeCoordination(
+        self,
+        trajectories: Sequence[ProbeTrajectory],
+        updateStatusLabel: bool = True,
+    ) -> dict[str, float | int | bool | str]:
+        if not self.logic or not self._parameterNode:
+            raise RuntimeError("Module logic is not initialized.")
+
+        settings = self._buildProbeCoordinationConstraintSettings()
+        pairRows, planSummary, noTouchSummary = self.logic.evaluatePlanProbeCoordination(
+            trajectories,
+            settings,
+            self._parameterNode.tumorSegmentation,
+        )
+
+        settingsTable = self.logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            PROBE_COORDINATION_SETTINGS_TABLE_NODE_NAME,
+            GENERATED_PROBE_COORDINATION_SETTINGS_TABLE_ATTRIBUTE,
+            self._parameterNode.probeCoordinationConstraintSettingsTable,
+        )
+        pairSummaryTable = self.logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            PROBE_PAIR_COORDINATION_TABLE_NODE_NAME,
+            GENERATED_PROBE_PAIR_COORDINATION_TABLE_ATTRIBUTE,
+            self._parameterNode.probePairCoordinationSummaryTable,
+        )
+        planSummaryTable = self.logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            PROBE_COORDINATION_SUMMARY_TABLE_NODE_NAME,
+            GENERATED_PROBE_COORDINATION_SUMMARY_TABLE_ATTRIBUTE,
+            self._parameterNode.probeCoordinationSummaryTable,
+        )
+        noTouchSummaryTable = self.logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            NO_TOUCH_SUMMARY_TABLE_NODE_NAME,
+            GENERATED_NO_TOUCH_SUMMARY_TABLE_ATTRIBUTE,
+            self._parameterNode.noTouchSummaryTable,
+        )
+        self.logic.populateProbeCoordinationConstraintSettingsTable(settingsTable, settings)
+        self.logic.populateProbePairCoordinationSummaryTable(pairSummaryTable, pairRows)
+        self.logic.populateProbeCoordinationSummaryTable(planSummaryTable, planSummary)
+        self.logic.populateNoTouchSummaryTable(noTouchSummaryTable, noTouchSummary)
+        self._parameterNode.probeCoordinationConstraintSettingsTable = settingsTable
+        self._parameterNode.probePairCoordinationSummaryTable = pairSummaryTable
+        self._parameterNode.probeCoordinationSummaryTable = planSummaryTable
+        self._parameterNode.noTouchSummaryTable = noTouchSummaryTable
+
+        if updateStatusLabel and hasattr(self.ui, "probeCoordinationStatusLabel"):
+            pairStatus = (
+                f"{int(planSummary.get('FeasiblePairCount', 0))}/{int(planSummary.get('PairCount', 0))} pairs feasible"
+            )
+            noTouchStatus = "No-touch not checked"
+            if bool(noTouchSummary.get("NoTouchChecked", False)):
+                noTouchStatus = "No-touch pass" if bool(noTouchSummary.get("NoTouchPass", False)) else "No-touch fail"
+            self.ui.probeCoordinationStatusLabel.text = f"{pairStatus}; {noTouchStatus}"
+
+        return planSummary
+
+    def onEvaluateProbeCoordinationButton(self) -> None:
+        with slicer.util.tryWithErrorDisplay(_("Failed to evaluate probe coordination."), waitCursor=True):
+            if not self.logic or not self._parameterNode:
+                raise RuntimeError("Module logic is not initialized.")
+            if not self._parameterNode.endpointsMarkups:
+                raise ValueError("Select an endpoint markups node before evaluating probe coordination.")
+
+            trajectories = self.logic.extractTrajectoriesFromMarkups(self._parameterNode.endpointsMarkups, strictEven=True)
+            if len(trajectories) == 0:
+                raise ValueError("No valid trajectories are available for probe coordination evaluation.")
+            self._evaluateAndPublishProbeCoordination(trajectories, updateStatusLabel=True)
+            self._updateButtonStates()
 
     def onEvaluateMarginsButton(self) -> None:
         with slicer.util.tryWithErrorDisplay(_("Failed to evaluate margins."), waitCursor=True):
@@ -606,6 +890,17 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 self._parameterNode.structureSafetyThresholdSummaryTable = structureSafetyThresholdSummaryTable
             else:
                 self._clearOwnedSafetyOutputs(clearReferences=True)
+
+            if self._parameterNode.endpointsMarkups:
+                controlPointCount = int(self._parameterNode.endpointsMarkups.GetNumberOfControlPoints())
+                if controlPointCount >= 2 and controlPointCount % 2 == 0:
+                    trajectories = self.logic.extractTrajectoriesFromMarkups(
+                        self._parameterNode.endpointsMarkups,
+                        strictEven=True,
+                    )
+                    self._evaluateAndPublishProbeCoordination(trajectories, updateStatusLabel=True)
+                else:
+                    self._clearOwnedCoordinationOutputs(clearReferences=True)
             self._updateButtonStates()
 
     def onRecolorMarginsButton(self) -> None:
@@ -629,6 +924,95 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             if not self._parameterNode.outputMarginModel:
                 raise ValueError("No margin model is available. Evaluate margins first.")
             self.logic.resetMarginModelColors(self._parameterNode.outputMarginModel)
+            self._updateButtonStates()
+
+    def _buildPlanExportConfig(self) -> PlanExportConfig:
+        if not self._parameterNode:
+            return PlanExportConfig()
+
+        exportMode = str(self.ui.exportModeComboBox.currentText) if hasattr(self.ui, "exportModeComboBox") else str(self._parameterNode.exportMode)
+        selectedExportScenarioID = (
+            str(self.ui.selectedExportScenarioIDLineEdit.text)
+            if hasattr(self.ui, "selectedExportScenarioIDLineEdit")
+            else str(self._parameterNode.selectedExportScenarioID)
+        )
+        exportBaseName = str(self.ui.exportBaseNameLineEdit.text) if hasattr(self.ui, "exportBaseNameLineEdit") else str(self._parameterNode.exportBaseName)
+        exportDirectory = (
+            str(self.ui.exportDirectoryLineEdit.text)
+            if hasattr(self.ui, "exportDirectoryLineEdit")
+            else str(self._parameterNode.lastExportDirectory)
+        )
+
+        self._parameterNode.exportMode = exportMode
+        self._parameterNode.selectedExportScenarioID = selectedExportScenarioID
+        self._parameterNode.exportBaseName = exportBaseName
+        self._parameterNode.lastExportDirectory = exportDirectory
+
+        return PlanExportConfig(
+            exportMode=exportMode,
+            selectedExportScenarioID=selectedExportScenarioID,
+            exportBaseName=exportBaseName,
+            exportDirectory=exportDirectory,
+            lastExportSequence=int(self._parameterNode.lastExportSequence),
+            includeWorkingPlan=bool(self._parameterNode.includeWorkingPlan),
+            includeSelectedScenario=bool(self._parameterNode.includeSelectedScenario),
+            includeScenarioComparison=bool(self._parameterNode.includeScenarioComparison),
+            includeRecommendationOutputs=bool(self._parameterNode.includeRecommendationOutputs),
+            includeTrajectoryTables=bool(self._parameterNode.includeTrajectoryTables),
+            includeSafetyTables=bool(self._parameterNode.includeSafetyTables),
+            includeCoverageTables=bool(self._parameterNode.includeCoverageTables),
+            includeFeasibilityTables=bool(self._parameterNode.includeFeasibilityTables),
+            includeCoordinationTables=bool(self._parameterNode.includeCoordinationTables),
+        )
+
+    def onExportBundleButton(self) -> None:
+        with slicer.util.tryWithErrorDisplay(_("Failed to export plan bundle."), waitCursor=True):
+            if not self.logic or not self._parameterNode:
+                raise RuntimeError("Module logic is not initialized.")
+
+            exportConfig = self._buildPlanExportConfig()
+            exportResult = self.logic.exportPlanBundle(self._parameterNode, exportConfig)
+
+            self._parameterNode.lastExportSequence = int(exportResult["exportSequence"])
+            self._parameterNode.lastExportDirectory = str(exportResult["exportDirectory"])
+            if hasattr(self.ui, "exportDirectoryLineEdit"):
+                self.ui.exportDirectoryLineEdit.text = str(self._parameterNode.lastExportDirectory)
+
+            exportSummaryTable = self.logic.createOrReuseOwnedOutputNode(
+                "vtkMRMLTableNode",
+                EXPORT_SUMMARY_TABLE_NODE_NAME,
+                GENERATED_EXPORT_SUMMARY_TABLE_ATTRIBUTE,
+                self._parameterNode.exportSummaryTable,
+            )
+            exportManifestPreviewTable = self.logic.createOrReuseOwnedOutputNode(
+                "vtkMRMLTableNode",
+                EXPORT_MANIFEST_PREVIEW_TABLE_NODE_NAME,
+                GENERATED_EXPORT_MANIFEST_PREVIEW_TABLE_ATTRIBUTE,
+                self._parameterNode.exportManifestPreviewTable,
+            )
+
+            self.logic.populateExportSummaryTable(
+                exportSummaryTable,
+                {
+                    "ExportMode": exportConfig.exportMode,
+                    "ExportBaseName": exportConfig.exportBaseName,
+                    "SelectedScenarioID": exportConfig.selectedExportScenarioID,
+                    "SelectedScenarioName": str(exportResult.get("selectedScenarioName", "")),
+                    "FileCount": int(exportResult["fileCount"]),
+                    "LastExportStatus": str(exportResult["status"]),
+                    "LastExportDirectory": str(exportResult["bundlePath"]),
+                    "LastExportSequence": int(exportResult["exportSequence"]),
+                },
+            )
+            manifestDict = asdict(exportResult["manifest"])
+            self.logic.populateExportManifestPreviewTable(exportManifestPreviewTable, manifestDict)
+            self._parameterNode.exportSummaryTable = exportSummaryTable
+            self._parameterNode.exportManifestPreviewTable = exportManifestPreviewTable
+
+            if hasattr(self.ui, "exportStatusLabel"):
+                self.ui.exportStatusLabel.text = (
+                    f"Exported {int(exportResult['fileCount'])} files to {str(exportResult['bundlePath'])}"
+                )
             self._updateButtonStates()
 
 
@@ -687,6 +1071,288 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         if table is None:
             return 0
         return int(table.GetNumberOfRows())
+
+    @staticmethod
+    def sanitizeExportBaseName(exportBaseName: str) -> str:
+        sanitized = "".join(character if character.isalnum() or character in ("-", "_") else "_" for character in exportBaseName)
+        sanitized = sanitized.strip("_")
+        return sanitized or "SV3D_Export"
+
+    @staticmethod
+    def buildDeterministicBundlePath(exportDirectory: str, exportBaseName: str, exportSequence: int) -> Path:
+        bundleBaseName = SurgicalVision3D_PlannerLogic.sanitizeExportBaseName(exportBaseName)
+        rootDirectory = Path(exportDirectory)
+        return rootDirectory / f"{bundleBaseName}_{int(exportSequence):04d}"
+
+    @staticmethod
+    def _findFirstTableNodeByName(nodeName: str) -> vtkMRMLTableNode | None:
+        tableNodes = slicer.util.getNodesByClass("vtkMRMLTableNode")
+        for tableNode in tableNodes:
+            if tableNode.GetName() == nodeName:
+                return tableNode
+        return None
+
+    @staticmethod
+    def _tableNodeToDictionaries(tableNode: vtkMRMLTableNode | None) -> list[dict[str, str]]:
+        if not tableNode or not slicer.mrmlScene.IsNodePresent(tableNode):
+            return []
+
+        table = tableNode.GetTable()
+        if table is None:
+            return []
+
+        columnCount = int(table.GetNumberOfColumns())
+        rowCount = int(table.GetNumberOfRows())
+        columnNames = [str(table.GetColumnName(columnIndex) or f"Column{columnIndex}") for columnIndex in range(columnCount)]
+        rows: list[dict[str, str]] = []
+        for rowIndex in range(rowCount):
+            rowValues: dict[str, str] = {}
+            for columnIndex, columnName in enumerate(columnNames):
+                rowValues[columnName] = table.GetValue(rowIndex, columnIndex).ToString()
+            rows.append(rowValues)
+        return rows
+
+    @staticmethod
+    def exportTableNodeToCsv(tableNode: vtkMRMLTableNode, outputCsvPath: Path) -> None:
+        if not tableNode:
+            raise ValueError("Table node is required for CSV export.")
+
+        table = tableNode.GetTable()
+        if table is None:
+            raise RuntimeError(f"Cannot export table '{tableNode.GetName()}': table data is unavailable.")
+
+        outputCsvPath.parent.mkdir(parents=True, exist_ok=True)
+        columnCount = int(table.GetNumberOfColumns())
+        rowCount = int(table.GetNumberOfRows())
+        columnNames = [str(table.GetColumnName(columnIndex) or f"Column{columnIndex}") for columnIndex in range(columnCount)]
+
+        with outputCsvPath.open("w", encoding="utf-8", newline="") as csvFile:
+            writer = csv.writer(csvFile)
+            writer.writerow(columnNames)
+            for rowIndex in range(rowCount):
+                writer.writerow([table.GetValue(rowIndex, columnIndex).ToString() for columnIndex in range(columnCount)])
+
+    @staticmethod
+    def exportStructuredSummaryToJson(outputJsonPath: Path, summaryData: dict[str, Any] | list[dict[str, Any]]) -> None:
+        outputJsonPath.parent.mkdir(parents=True, exist_ok=True)
+        with outputJsonPath.open("w", encoding="utf-8", newline="\n") as jsonFile:
+            json.dump(summaryData, jsonFile, indent=2, sort_keys=True)
+
+    def collectCurrentPlanExportData(
+        self,
+        parameterNode: SurgicalVision3D_PlannerParameterNode,
+        exportConfig: PlanExportConfig,
+    ) -> tuple[dict[str, Any], list[tuple[str, vtkMRMLTableNode]]]:
+        generatedProbeCount = len(self.resolveExistingNodeIDs(self.deserializeNodeIDs(parameterNode.generatedProbeNodeIDs)))
+        currentPlanSummary = {
+            "ReferenceProbeSegmentationID": parameterNode.referenceProbeSegmentation.GetID() if parameterNode.referenceProbeSegmentation else "",
+            "ReferenceProbeSegmentationName": parameterNode.referenceProbeSegmentation.GetName() if parameterNode.referenceProbeSegmentation else "",
+            "TumorSegmentationID": parameterNode.tumorSegmentation.GetID() if parameterNode.tumorSegmentation else "",
+            "TumorSegmentationName": parameterNode.tumorSegmentation.GetName() if parameterNode.tumorSegmentation else "",
+            "RiskStructuresSegmentationID": parameterNode.riskStructuresSegmentation.GetID() if parameterNode.riskStructuresSegmentation else "",
+            "RiskStructuresSegmentationName": parameterNode.riskStructuresSegmentation.GetName() if parameterNode.riskStructuresSegmentation else "",
+            "CombinedProbeSegmentationID": parameterNode.combinedProbeSegmentation.GetID() if parameterNode.combinedProbeSegmentation else "",
+            "CombinedProbeSegmentationName": parameterNode.combinedProbeSegmentation.GetName() if parameterNode.combinedProbeSegmentation else "",
+            "GeneratedProbeCount": int(generatedProbeCount),
+            "GeneratedTrajectoryLineCount": int(len(self.resolveExistingNodeIDs(self.deserializeNodeIDs(parameterNode.generatedTrajectoryLineIDs)))),
+            "ExportMode": exportConfig.exportMode,
+            "SelectedExportScenarioID": exportConfig.selectedExportScenarioID,
+        }
+
+        tableExports: list[tuple[str, vtkMRMLTableNode]] = []
+        seenNodeIDs: set[str] = set()
+
+        def addTable(filename: str, tableNode: vtkMRMLTableNode | None) -> None:
+            if not tableNode or not slicer.mrmlScene.IsNodePresent(tableNode):
+                return
+            if tableNode.GetID() in seenNodeIDs:
+                return
+            seenNodeIDs.add(tableNode.GetID())
+            tableExports.append((filename, tableNode))
+
+        if exportConfig.includeTrajectoryTables:
+            addTable("trajectory_summary.csv", parameterNode.trajectorySummaryTable)
+        if exportConfig.includeWorkingPlan:
+            addTable("plan_summary.csv", parameterNode.planSummaryTable)
+            addTable("margin_threshold_summary.csv", parameterNode.marginThresholdSummaryTable)
+        if exportConfig.includeSafetyTables:
+            addTable("structure_safety_summary.csv", parameterNode.structureSafetySummaryTable)
+            addTable("structure_safety_threshold_summary.csv", parameterNode.structureSafetyThresholdSummaryTable)
+        if exportConfig.includeCoordinationTables:
+            addTable("probe_coordination_constraint_settings.csv", parameterNode.probeCoordinationConstraintSettingsTable)
+            addTable("probe_pair_coordination_summary.csv", parameterNode.probePairCoordinationSummaryTable)
+            addTable("probe_coordination_summary.csv", parameterNode.probeCoordinationSummaryTable)
+            addTable("no_touch_summary.csv", parameterNode.noTouchSummaryTable)
+
+        if exportConfig.includeCoverageTables:
+            addTable("coverage_summary.csv", self._findFirstTableNodeByName("SV3D Coverage Summary"))
+            addTable("multi_target_coverage_summary.csv", self._findFirstTableNodeByName("SV3D Multi-Target Coverage Summary"))
+        if exportConfig.includeFeasibilityTables:
+            addTable("trajectory_feasibility_summary.csv", self._findFirstTableNodeByName("SV3D Trajectory Feasibility Summary"))
+            addTable("plan_trajectory_feasibility_summary.csv", self._findFirstTableNodeByName("SV3D Plan Trajectory Feasibility Summary"))
+            addTable("candidate_feasibility_summary.csv", self._findFirstTableNodeByName("SV3D Candidate Feasibility Summary"))
+        if exportConfig.includeScenarioComparison:
+            addTable("scenario_comparison.csv", self._findFirstTableNodeByName("SV3D Scenario Comparison"))
+            addTable("scenario_delta_comparison.csv", self._findFirstTableNodeByName("SV3D Scenario Delta Comparison"))
+            addTable("scenario_frontier_summary.csv", self._findFirstTableNodeByName("SV3D Scenario Frontier Summary"))
+        if exportConfig.includeRecommendationOutputs:
+            addTable("feasible_candidate_recommendation.csv", self._findFirstTableNodeByName("SV3D Feasible Candidate Recommendation"))
+            addTable("scenario_recommendation_summary.csv", self._findFirstTableNodeByName("SV3D Scenario Recommendation Summary"))
+
+        return currentPlanSummary, tableExports
+
+    def collectScenarioExportData(self, selectedScenarioID: str) -> dict[str, Any]:
+        if not selectedScenarioID.strip():
+            raise ValueError("Selected scenario export mode requires a non-empty scenario ID.")
+
+        scenarioSummary: dict[str, Any] = {
+            "SelectedScenarioID": selectedScenarioID,
+            "ScenarioName": "",
+            "Source": "Unavailable",
+            "Notes": "Scenario registry table not found.",
+        }
+
+        scenarioRegistryTable = self._findFirstTableNodeByName("SV3D Scenario Registry")
+        if not scenarioRegistryTable:
+            return scenarioSummary
+
+        rows = self._tableNodeToDictionaries(scenarioRegistryTable)
+        for row in rows:
+            scenarioIDValue = str(row.get("ScenarioID", "")).strip()
+            if scenarioIDValue == selectedScenarioID.strip():
+                scenarioSummary["ScenarioName"] = str(row.get("ScenarioName", ""))
+                scenarioSummary["Source"] = "SV3D Scenario Registry"
+                scenarioSummary["Notes"] = ""
+                scenarioSummary["ScenarioRow"] = row
+                return scenarioSummary
+
+        scenarioSummary["Notes"] = f"Scenario ID '{selectedScenarioID}' was not found in SV3D Scenario Registry."
+        return scenarioSummary
+
+    def buildPlanExportManifest(
+        self,
+        parameterNode: SurgicalVision3D_PlannerParameterNode,
+        exportConfig: PlanExportConfig,
+        exportSequence: int,
+        filesExported: Sequence[str],
+        selectedScenarioSummary: dict[str, Any] | None = None,
+    ) -> PlanExportManifest:
+        selectedScenarioSummary = selectedScenarioSummary or {}
+        tumorSegmentID = ""
+        tumorSegmentName = ""
+        if parameterNode.planSummaryTable and slicer.mrmlScene.IsNodePresent(parameterNode.planSummaryTable):
+            summaryRows = self._tableNodeToDictionaries(parameterNode.planSummaryTable)
+            if len(summaryRows) > 0:
+                tumorSegmentID = str(summaryRows[0].get("Tumor Segment ID", ""))
+                tumorSegmentName = str(summaryRows[0].get("Tumor Segment Name", ""))
+
+        includeFlags = {
+            "includeWorkingPlan": bool(exportConfig.includeWorkingPlan),
+            "includeSelectedScenario": bool(exportConfig.includeSelectedScenario),
+            "includeScenarioComparison": bool(exportConfig.includeScenarioComparison),
+            "includeRecommendationOutputs": bool(exportConfig.includeRecommendationOutputs),
+            "includeTrajectoryTables": bool(exportConfig.includeTrajectoryTables),
+            "includeSafetyTables": bool(exportConfig.includeSafetyTables),
+            "includeCoverageTables": bool(exportConfig.includeCoverageTables),
+            "includeFeasibilityTables": bool(exportConfig.includeFeasibilityTables),
+            "includeCoordinationTables": bool(exportConfig.includeCoordinationTables),
+        }
+
+        return PlanExportManifest(
+            exportId=f"SV3D-Export-{int(exportSequence):04d}",
+            exportTimestampISO=datetime.now().isoformat(timespec="seconds"),
+            exportSequence=int(exportSequence),
+            exportMode=exportConfig.exportMode,
+            exportBaseName=exportConfig.exportBaseName,
+            selectedScenarioID=str(exportConfig.selectedExportScenarioID),
+            selectedScenarioName=str(selectedScenarioSummary.get("ScenarioName", "")),
+            profileSourceMode="referenceSegmentation",
+            presetID="",
+            presetName="",
+            targetSegmentID=tumorSegmentID,
+            targetSegmentName=tumorSegmentName,
+            filesExported=[str(filePath) for filePath in filesExported],
+            includeFlags=includeFlags,
+            notes=str(selectedScenarioSummary.get("Notes", "")),
+        )
+
+    def exportPlanBundle(
+        self,
+        parameterNode: SurgicalVision3D_PlannerParameterNode,
+        exportConfig: PlanExportConfig,
+    ) -> dict[str, Any]:
+        if not exportConfig.exportBaseName.strip():
+            raise ValueError("Export base name is required.")
+
+        exportDirectory = exportConfig.exportDirectory.strip() or str(Path(slicer.app.temporaryPath) / "SurgicalVision3D_PlannerExports")
+        exportRoot = Path(exportDirectory)
+        exportRoot.mkdir(parents=True, exist_ok=True)
+
+        exportSequence = max(1, int(exportConfig.lastExportSequence) + 1)
+        bundlePath = self.buildDeterministicBundlePath(str(exportRoot), exportConfig.exportBaseName, exportSequence)
+        while bundlePath.exists():
+            exportSequence += 1
+            bundlePath = self.buildDeterministicBundlePath(str(exportRoot), exportConfig.exportBaseName, exportSequence)
+
+        bundlePath.mkdir(parents=True, exist_ok=False)
+        tablesDirectory = bundlePath / "tables"
+        provenanceDirectory = bundlePath / "provenance"
+        tablesDirectory.mkdir(parents=True, exist_ok=True)
+        provenanceDirectory.mkdir(parents=True, exist_ok=True)
+
+        currentPlanSummary, tableExports = self.collectCurrentPlanExportData(parameterNode, exportConfig)
+        exportedFiles: list[str] = []
+
+        planSummaryPath = bundlePath / "plan_summary.json"
+        self.exportStructuredSummaryToJson(planSummaryPath, currentPlanSummary)
+        exportedFiles.append(str(planSummaryPath.relative_to(bundlePath)))
+
+        selectedScenarioSummary: dict[str, Any] = {}
+        shouldIncludeSelectedScenario = bool(exportConfig.includeSelectedScenario or exportConfig.exportMode == "SelectedScenario")
+        if shouldIncludeSelectedScenario:
+            selectedScenarioSummary = self.collectScenarioExportData(exportConfig.selectedExportScenarioID)
+            scenarioSummaryPath = bundlePath / "scenario_summary.json"
+            self.exportStructuredSummaryToJson(scenarioSummaryPath, selectedScenarioSummary)
+            exportedFiles.append(str(scenarioSummaryPath.relative_to(bundlePath)))
+
+        for tableFileName, tableNode in tableExports:
+            outputCsvPath = tablesDirectory / tableFileName
+            self.exportTableNodeToCsv(tableNode, outputCsvPath)
+            exportedFiles.append(str(outputCsvPath.relative_to(bundlePath)))
+
+        scenarioRegistryTable = self._findFirstTableNodeByName("SV3D Scenario Registry")
+        if scenarioRegistryTable:
+            scenarioRegistryJsonPath = provenanceDirectory / "scenario_registry.json"
+            self.exportStructuredSummaryToJson(scenarioRegistryJsonPath, self._tableNodeToDictionaries(scenarioRegistryTable))
+            exportedFiles.append(str(scenarioRegistryJsonPath.relative_to(bundlePath)))
+
+        recommendationSummaryTable = self._findFirstTableNodeByName("SV3D Feasible Candidate Recommendation")
+        if recommendationSummaryTable:
+            recommendationJsonPath = provenanceDirectory / "recommendation_summary.json"
+            self.exportStructuredSummaryToJson(recommendationJsonPath, self._tableNodeToDictionaries(recommendationSummaryTable))
+            exportedFiles.append(str(recommendationJsonPath.relative_to(bundlePath)))
+
+        manifest = self.buildPlanExportManifest(
+            parameterNode=parameterNode,
+            exportConfig=exportConfig,
+            exportSequence=exportSequence,
+            filesExported=exportedFiles,
+            selectedScenarioSummary=selectedScenarioSummary,
+        )
+        manifestPath = bundlePath / "manifest.json"
+        exportedFiles.insert(0, str(manifestPath.relative_to(bundlePath)))
+        manifest.filesExported = list(exportedFiles)
+        self.exportStructuredSummaryToJson(manifestPath, asdict(manifest))
+
+        return {
+            "manifest": manifest,
+            "bundlePath": str(bundlePath),
+            "exportDirectory": str(exportRoot),
+            "exportSequence": int(exportSequence),
+            "fileCount": int(len(exportedFiles)),
+            "status": "Success",
+            "selectedScenarioName": str(selectedScenarioSummary.get("ScenarioName", "")),
+        }
 
     @staticmethod
     def computeTrajectoryMetrics(trajectories: Sequence[ProbeTrajectory]) -> list[dict[str, float | int | str]]:
@@ -809,6 +1475,286 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             "CountAtLeast5Mm": countAtLeast5,
             "PercentAtLeast5Mm": float(100.0 * countAtLeast5 / totalValueCount),
         }
+
+    @staticmethod
+    def computeEntryPointSpacingMm(trajectoryA: ProbeTrajectory, trajectoryB: ProbeTrajectory) -> float:
+        pointA = np.asarray(trajectoryA.entryPointRAS, dtype=float)
+        pointB = np.asarray(trajectoryB.entryPointRAS, dtype=float)
+        return float(np.linalg.norm(pointA - pointB))
+
+    @staticmethod
+    def computeTargetPointSpacingMm(trajectoryA: ProbeTrajectory, trajectoryB: ProbeTrajectory) -> float:
+        pointA = np.asarray(trajectoryA.targetPointRAS, dtype=float)
+        pointB = np.asarray(trajectoryB.targetPointRAS, dtype=float)
+        return float(np.linalg.norm(pointA - pointB))
+
+    @staticmethod
+    def _segmentToSegmentDistanceMm(
+        pointP0: Sequence[float],
+        pointP1: Sequence[float],
+        pointQ0: Sequence[float],
+        pointQ1: Sequence[float],
+    ) -> float:
+        p0 = np.asarray(pointP0, dtype=float)
+        p1 = np.asarray(pointP1, dtype=float)
+        q0 = np.asarray(pointQ0, dtype=float)
+        q1 = np.asarray(pointQ1, dtype=float)
+        u = p1 - p0
+        v = q1 - q0
+        w = p0 - q0
+
+        a = float(np.dot(u, u))
+        b = float(np.dot(u, v))
+        c = float(np.dot(v, v))
+        d = float(np.dot(u, w))
+        e = float(np.dot(v, w))
+        determinant = (a * c) - (b * b)
+        epsilon = 1e-8
+
+        sN = 0.0
+        sD = determinant
+        tN = 0.0
+        tD = determinant
+
+        if determinant < epsilon:
+            sN = 0.0
+            sD = 1.0
+            tN = e
+            tD = c
+        else:
+            sN = (b * e) - (c * d)
+            tN = (a * e) - (b * d)
+            if sN < 0.0:
+                sN = 0.0
+                tN = e
+                tD = c
+            elif sN > sD:
+                sN = sD
+                tN = e + b
+                tD = c
+
+        if tN < 0.0:
+            tN = 0.0
+            if -d < 0.0:
+                sN = 0.0
+            elif -d > a:
+                sN = sD
+            else:
+                sN = -d
+                sD = a
+        elif tN > tD:
+            tN = tD
+            if (-d + b) < 0.0:
+                sN = 0.0
+            elif (-d + b) > a:
+                sN = sD
+            else:
+                sN = -d + b
+                sD = a
+
+        segmentAParam = 0.0 if abs(sN) < epsilon else (sN / sD)
+        segmentBParam = 0.0 if abs(tN) < epsilon else (tN / tD)
+        delta = w + (segmentAParam * u) - (segmentBParam * v)
+        return float(np.linalg.norm(delta))
+
+    @staticmethod
+    def computeInterProbeDistanceMm(trajectoryA: ProbeTrajectory, trajectoryB: ProbeTrajectory) -> float:
+        # First-pass definition: minimum distance between trajectory centerline line segments.
+        return SurgicalVision3D_PlannerLogic._segmentToSegmentDistanceMm(
+            trajectoryA.entryPointRAS,
+            trajectoryA.targetPointRAS,
+            trajectoryB.entryPointRAS,
+            trajectoryB.targetPointRAS,
+        )
+
+    @staticmethod
+    def computeProbeAxisAngleDeg(trajectoryA: ProbeTrajectory, trajectoryB: ProbeTrajectory) -> float:
+        directionA = _normalize_vector(trajectoryA.directionVector)
+        directionB = _normalize_vector(trajectoryB.directionVector)
+        # Treat opposite directions as parallel for inter-probe parallelism checks.
+        cosineValue = float(np.clip(abs(np.dot(directionA, directionB)), 0.0, 1.0))
+        return float(np.degrees(np.arccos(cosineValue)))
+
+    @staticmethod
+    def computePairwiseProbeVolumeOverlap(trajectoryA: ProbeTrajectory, trajectoryB: ProbeTrajectory) -> float:
+        interProbeDistance = SurgicalVision3D_PlannerLogic.computeInterProbeDistanceMm(trajectoryA, trajectoryB)
+        referenceLength = max(min(float(trajectoryA.lengthMm), float(trajectoryB.lengthMm)), 1e-3)
+        overlapProxy = max(0.0, 1.0 - (interProbeDistance / referenceLength))
+        # Conservative proxy in percent: 0 means no estimated redundancy, 100 means maximal redundancy.
+        return float(100.0 * overlapProxy)
+
+    @staticmethod
+    def formatProbePairFailedConstraintNames(failedConstraintNames: Sequence[str]) -> str:
+        if len(failedConstraintNames) == 0:
+            return ""
+        return ";".join(sorted(set(str(name) for name in failedConstraintNames if name)))
+
+    def evaluateProbePairCoordination(
+        self,
+        trajectoryA: ProbeTrajectory,
+        trajectoryB: ProbeTrajectory,
+        settings: ProbeCoordinationConstraintSettings,
+    ) -> dict[str, float | int | bool | str]:
+        interProbeDistance = self.computeInterProbeDistanceMm(trajectoryA, trajectoryB)
+        entrySpacing = self.computeEntryPointSpacingMm(trajectoryA, trajectoryB)
+        targetSpacing = self.computeTargetPointSpacingMm(trajectoryA, trajectoryB)
+        axisAngleDeg = self.computeProbeAxisAngleDeg(trajectoryA, trajectoryB)
+        overlapPercent = self.computePairwiseProbeVolumeOverlap(trajectoryA, trajectoryB)
+
+        failedConstraints: list[str] = []
+        if settings.enableInterProbeDistanceRule:
+            if interProbeDistance < float(settings.minInterProbeDistanceMm):
+                failedConstraints.append("InterProbeDistanceBelowMin")
+            if interProbeDistance > float(settings.maxInterProbeDistanceMm):
+                failedConstraints.append("InterProbeDistanceAboveMax")
+        if settings.enableEntrySpacingRule and entrySpacing < float(settings.minEntryPointSpacingMm):
+            failedConstraints.append("EntryPointSpacingBelowMin")
+        if settings.enableTargetSpacingRule and targetSpacing < float(settings.minTargetPointSpacingMm):
+            failedConstraints.append("TargetPointSpacingBelowMin")
+        if settings.enableAngleRule and axisAngleDeg < float(settings.maxParallelAngleDeg):
+            failedConstraints.append("ProbeAxesTooParallel")
+        if settings.enableOverlapRule and overlapPercent > float(settings.maxAllowedOverlapPercentBetweenPerProbeVolumes):
+            failedConstraints.append("OverlapRedundancyAboveMax")
+
+        probeAIndex = min(int(trajectoryA.trajectoryIndex) + 1, int(trajectoryB.trajectoryIndex) + 1)
+        probeBIndex = max(int(trajectoryA.trajectoryIndex) + 1, int(trajectoryB.trajectoryIndex) + 1)
+        failedConstraintNames = self.formatProbePairFailedConstraintNames(failedConstraints)
+        return {
+            "ProbeAIndex": probeAIndex,
+            "ProbeBIndex": probeBIndex,
+            "IsFeasible": len(failedConstraints) == 0,
+            "FailedConstraintCount": int(len(failedConstraints)),
+            "FailedConstraintNames": failedConstraintNames,
+            "InterProbeDistanceMm": float(interProbeDistance),
+            "EntryPointSpacingMm": float(entrySpacing),
+            "TargetPointSpacingMm": float(targetSpacing),
+            "ProbeAxisAngleDeg": float(axisAngleDeg),
+            "OverlapRedundancyPercent": float(overlapPercent),
+        }
+
+    @staticmethod
+    def _isPointInsideClosedSurface(pointRAS: Sequence[float], closedSurface: vtk.vtkPolyData) -> bool:
+        points = vtk.vtkPoints()
+        points.InsertNextPoint(float(pointRAS[0]), float(pointRAS[1]), float(pointRAS[2]))
+        vertices = vtk.vtkCellArray()
+        vertices.InsertNextCell(1)
+        vertices.InsertCellPoint(0)
+        pointPolyData = vtk.vtkPolyData()
+        pointPolyData.SetPoints(points)
+        pointPolyData.SetVerts(vertices)
+
+        enclosedPoints = vtk.vtkSelectEnclosedPoints()
+        enclosedPoints.SetSurfaceData(closedSurface)
+        enclosedPoints.SetInputData(pointPolyData)
+        enclosedPoints.Update()
+        return bool(enclosedPoints.IsInside(0) == 1)
+
+    def evaluateNoTouchArrangement(
+        self,
+        trajectories: Sequence[ProbeTrajectory],
+        tumorSegmentation: vtkMRMLSegmentationNode | None,
+    ) -> dict[str, float | int | bool | str]:
+        if tumorSegmentation is None:
+            return {
+                "NoTouchChecked": False,
+                "NoTouchPass": False,
+                "Reason": "Tumor segmentation is required when no-touch checking is enabled.",
+                "EntryPointsInsideTumorCount": 0,
+                "FailedTrajectoryIndices": "",
+            }
+
+        tumorSegmentID = self.getWorkingSegmentID(tumorSegmentation, "no-touch evaluation")
+        self._ensureSegmentationHasClosedSurface(tumorSegmentation)
+        tumorSurface = vtk.vtkPolyData()
+        tumorSegmentation.GetClosedSurfaceRepresentation(tumorSegmentID, tumorSurface)
+        if tumorSurface.GetNumberOfPoints() <= 0:
+            raise RuntimeError("No-touch evaluation failed because tumor closed-surface representation is empty.")
+
+        failedTrajectoryIndices: list[int] = []
+        for trajectory in trajectories:
+            if self._isPointInsideClosedSurface(trajectory.entryPointRAS, tumorSurface):
+                failedTrajectoryIndices.append(int(trajectory.trajectoryIndex) + 1)
+
+        return {
+            "NoTouchChecked": True,
+            "NoTouchPass": len(failedTrajectoryIndices) == 0,
+            "Reason": "" if len(failedTrajectoryIndices) == 0 else "Entry point is inside tumor for one or more trajectories.",
+            "EntryPointsInsideTumorCount": int(len(failedTrajectoryIndices)),
+            "FailedTrajectoryIndices": ",".join(str(index) for index in failedTrajectoryIndices),
+        }
+
+    @staticmethod
+    def aggregateProbeCoordinationFailures(pairRows: Sequence[dict[str, float | int | bool | str]]) -> str:
+        failureNames: set[str] = set()
+        for row in pairRows:
+            rowFailures = str(row.get("FailedConstraintNames", ""))
+            for name in rowFailures.split(";"):
+                cleaned = name.strip()
+                if cleaned:
+                    failureNames.add(cleaned)
+        return ";".join(sorted(failureNames))
+
+    def evaluatePlanProbeCoordination(
+        self,
+        trajectories: Sequence[ProbeTrajectory],
+        settings: ProbeCoordinationConstraintSettings,
+        tumorSegmentation: vtkMRMLSegmentationNode | None,
+    ) -> tuple[list[dict[str, float | int | bool | str]], dict[str, float | int | bool | str], dict[str, float | int | bool | str]]:
+        if len(trajectories) == 0:
+            raise ValueError("At least one trajectory is required for probe coordination evaluation.")
+
+        pairRows: list[dict[str, float | int | bool | str]] = []
+        for trajectoryIndexA in range(len(trajectories)):
+            for trajectoryIndexB in range(trajectoryIndexA + 1, len(trajectories)):
+                pairRows.append(
+                    self.evaluateProbePairCoordination(
+                        trajectories[trajectoryIndexA],
+                        trajectories[trajectoryIndexB],
+                        settings,
+                    )
+                )
+        pairRows.sort(key=lambda row: (int(row.get("ProbeAIndex", 0)), int(row.get("ProbeBIndex", 0))))
+
+        pairCount = int(len(pairRows))
+        feasiblePairCount = int(sum(1 for row in pairRows if bool(row.get("IsFeasible", False))))
+        infeasiblePairCount = int(pairCount - feasiblePairCount)
+        allPairsFeasible = infeasiblePairCount == 0
+
+        noTouchSummary = {
+            "NoTouchChecked": False,
+            "NoTouchPass": True,
+            "Reason": "",
+            "EntryPointsInsideTumorCount": 0,
+            "FailedTrajectoryIndices": "",
+        }
+        if settings.enableNoTouchCheck:
+            noTouchSummary = self.evaluateNoTouchArrangement(trajectories, tumorSegmentation)
+
+        noTouchPass = bool(noTouchSummary.get("NoTouchPass", True))
+        coordinationFailureReasons: list[str] = []
+        if settings.requireAllProbePairsFeasible and not allPairsFeasible:
+            coordinationFailureReasons.append("ProbePairCoordinationFailed")
+        if settings.enableNoTouchCheck and not noTouchPass:
+            coordinationFailureReasons.append("NoTouchCheckFailed")
+
+        coordinationGatePass = (
+            (not settings.requireAllProbePairsFeasible or allPairsFeasible)
+            and (not settings.enableNoTouchCheck or noTouchPass)
+        )
+
+        planSummary: dict[str, float | int | bool | str] = {
+            "ScenarioOrPlanName": "CurrentPlan",
+            "ProbeCount": int(len(trajectories)),
+            "PairCount": pairCount,
+            "FeasiblePairCount": feasiblePairCount,
+            "InfeasiblePairCount": infeasiblePairCount,
+            "AllPairsFeasible": bool(allPairsFeasible),
+            "AggregatedFailedConstraintNames": self.aggregateProbeCoordinationFailures(pairRows),
+            "NoTouchPass": bool(noTouchPass),
+            "CoordinationGatePass": bool(coordinationGatePass),
+            "CoordinationFailureSummary": ";".join(coordinationFailureReasons),
+        }
+        return pairRows, planSummary, noTouchSummary
 
     @staticmethod
     def extractTrajectoriesFromPointPairs(
@@ -1523,6 +2469,248 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             "Percent >= 5 mm",
             [float(row.get("PercentAtLeast5Mm", 0.0)) for row in thresholdSummaryRows],
         )
+
+    def populateProbeCoordinationConstraintSettingsTable(
+        self,
+        tableNode: vtkMRMLTableNode | None,
+        settings: ProbeCoordinationConstraintSettings,
+    ) -> None:
+        if not tableNode:
+            raise ValueError("Probe coordination constraint settings table node is required.")
+
+        tableNode.RemoveAllColumns()
+        self._addStringColumn(
+            tableNode,
+            "Setting",
+            [
+                "MinInterProbeDistanceMm",
+                "MaxInterProbeDistanceMm",
+                "MinEntryPointSpacingMm",
+                "MinTargetPointSpacingMm",
+                "MaxParallelAngleDeg",
+                "MaxAllowedOverlapPercentBetweenPerProbeVolumes",
+                "EnableNoTouchCheck",
+                "RequireAllProbePairsFeasible",
+                "EnableInterProbeDistanceRule",
+                "EnableEntrySpacingRule",
+                "EnableTargetSpacingRule",
+                "EnableAngleRule",
+                "EnableOverlapRule",
+            ],
+        )
+        self._addStringColumn(
+            tableNode,
+            "Value",
+            [
+                f"{float(settings.minInterProbeDistanceMm):.3f}",
+                f"{float(settings.maxInterProbeDistanceMm):.3f}",
+                f"{float(settings.minEntryPointSpacingMm):.3f}",
+                f"{float(settings.minTargetPointSpacingMm):.3f}",
+                f"{float(settings.maxParallelAngleDeg):.3f}",
+                f"{float(settings.maxAllowedOverlapPercentBetweenPerProbeVolumes):.3f}",
+                str(bool(settings.enableNoTouchCheck)),
+                str(bool(settings.requireAllProbePairsFeasible)),
+                str(bool(settings.enableInterProbeDistanceRule)),
+                str(bool(settings.enableEntrySpacingRule)),
+                str(bool(settings.enableTargetSpacingRule)),
+                str(bool(settings.enableAngleRule)),
+                str(bool(settings.enableOverlapRule)),
+            ],
+        )
+
+    def populateProbePairCoordinationSummaryTable(
+        self,
+        tableNode: vtkMRMLTableNode | None,
+        pairRows: Sequence[dict[str, float | int | bool | str]],
+    ) -> None:
+        if not tableNode:
+            raise ValueError("Probe pair coordination summary table node is required.")
+
+        orderedRows = sorted(
+            pairRows,
+            key=lambda row: (int(row.get("ProbeAIndex", 0)), int(row.get("ProbeBIndex", 0))),
+        )
+        tableNode.RemoveAllColumns()
+        self._addNumericColumn(
+            tableNode,
+            "Probe A Index",
+            [int(row.get("ProbeAIndex", 0)) for row in orderedRows],
+            integer=True,
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Probe B Index",
+            [int(row.get("ProbeBIndex", 0)) for row in orderedRows],
+            integer=True,
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Is Feasible",
+            [1 if bool(row.get("IsFeasible", False)) else 0 for row in orderedRows],
+            integer=True,
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Failed Constraint Count",
+            [int(row.get("FailedConstraintCount", 0)) for row in orderedRows],
+            integer=True,
+        )
+        self._addStringColumn(
+            tableNode,
+            "Failed Constraint Names",
+            [str(row.get("FailedConstraintNames", "")) for row in orderedRows],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Inter-Probe Distance (mm)",
+            [float(row.get("InterProbeDistanceMm", float("nan"))) for row in orderedRows],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Entry Point Spacing (mm)",
+            [float(row.get("EntryPointSpacingMm", float("nan"))) for row in orderedRows],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Target Point Spacing (mm)",
+            [float(row.get("TargetPointSpacingMm", float("nan"))) for row in orderedRows],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Probe Axis Angle (deg)",
+            [float(row.get("ProbeAxisAngleDeg", float("nan"))) for row in orderedRows],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Overlap Redundancy (%)",
+            [float(row.get("OverlapRedundancyPercent", float("nan"))) for row in orderedRows],
+        )
+
+    def populateProbeCoordinationSummaryTable(
+        self,
+        tableNode: vtkMRMLTableNode | None,
+        summary: dict[str, float | int | bool | str],
+    ) -> None:
+        if not tableNode:
+            raise ValueError("Probe coordination summary table node is required.")
+
+        tableNode.RemoveAllColumns()
+        self._addStringColumn(tableNode, "Scenario Or Plan", [summary.get("ScenarioOrPlanName", "CurrentPlan")])
+        self._addNumericColumn(tableNode, "Probe Count", [int(summary.get("ProbeCount", 0))], integer=True)
+        self._addNumericColumn(tableNode, "Pair Count", [int(summary.get("PairCount", 0))], integer=True)
+        self._addNumericColumn(tableNode, "Feasible Pair Count", [int(summary.get("FeasiblePairCount", 0))], integer=True)
+        self._addNumericColumn(tableNode, "Infeasible Pair Count", [int(summary.get("InfeasiblePairCount", 0))], integer=True)
+        self._addNumericColumn(
+            tableNode,
+            "All Pairs Feasible",
+            [1 if bool(summary.get("AllPairsFeasible", False)) else 0],
+            integer=True,
+        )
+        self._addStringColumn(
+            tableNode,
+            "Aggregated Failed Constraint Names",
+            [summary.get("AggregatedFailedConstraintNames", "")],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "No-Touch Pass",
+            [1 if bool(summary.get("NoTouchPass", False)) else 0],
+            integer=True,
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Coordination Gate Pass",
+            [1 if bool(summary.get("CoordinationGatePass", False)) else 0],
+            integer=True,
+        )
+        self._addStringColumn(
+            tableNode,
+            "Coordination Failure Summary",
+            [str(summary.get("CoordinationFailureSummary", ""))],
+        )
+
+    def populateNoTouchSummaryTable(
+        self,
+        tableNode: vtkMRMLTableNode | None,
+        noTouchSummary: dict[str, float | int | bool | str],
+    ) -> None:
+        if not tableNode:
+            raise ValueError("No-touch summary table node is required.")
+
+        tableNode.RemoveAllColumns()
+        self._addNumericColumn(
+            tableNode,
+            "No-Touch Checked",
+            [1 if bool(noTouchSummary.get("NoTouchChecked", False)) else 0],
+            integer=True,
+        )
+        self._addNumericColumn(
+            tableNode,
+            "No-Touch Pass",
+            [1 if bool(noTouchSummary.get("NoTouchPass", False)) else 0],
+            integer=True,
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Entry Points Inside Tumor Count",
+            [int(noTouchSummary.get("EntryPointsInsideTumorCount", 0))],
+            integer=True,
+        )
+        self._addStringColumn(
+            tableNode,
+            "Failed Trajectory Indices",
+            [str(noTouchSummary.get("FailedTrajectoryIndices", ""))],
+        )
+        self._addStringColumn(tableNode, "Reason", [str(noTouchSummary.get("Reason", ""))])
+
+    def populateExportSummaryTable(
+        self,
+        tableNode: vtkMRMLTableNode | None,
+        summaryValues: dict[str, Any],
+    ) -> None:
+        if not tableNode:
+            raise ValueError("Export summary table node is required.")
+
+        orderedFields = [
+            "ExportMode",
+            "ExportBaseName",
+            "SelectedScenarioID",
+            "SelectedScenarioName",
+            "FileCount",
+            "LastExportStatus",
+            "LastExportDirectory",
+            "LastExportSequence",
+        ]
+        tableNode.RemoveAllColumns()
+        self._addStringColumn(tableNode, "Field", orderedFields)
+        self._addStringColumn(tableNode, "Value", [str(summaryValues.get(field, "")) for field in orderedFields])
+
+    def populateExportManifestPreviewTable(
+        self,
+        tableNode: vtkMRMLTableNode | None,
+        manifestValues: dict[str, Any],
+    ) -> None:
+        if not tableNode:
+            raise ValueError("Export manifest preview table node is required.")
+
+        previewFields = [
+            "exportId",
+            "exportTimestampISO",
+            "exportSequence",
+            "exportMode",
+            "exportBaseName",
+            "selectedScenarioID",
+            "selectedScenarioName",
+            "profileSourceMode",
+            "presetID",
+            "presetName",
+            "targetSegmentID",
+            "targetSegmentName",
+            "notes",
+        ]
+        tableNode.RemoveAllColumns()
+        self._addStringColumn(tableNode, "Field", previewFields)
+        self._addStringColumn(tableNode, "Value", [str(manifestValues.get(field, "")) for field in previewFields])
 
     @staticmethod
     def _addStringColumn(tableNode: vtkMRMLTableNode, columnName: str, values: Sequence[float | int | str]) -> None:

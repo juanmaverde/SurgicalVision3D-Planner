@@ -512,7 +512,7 @@
         </property>
        </widget>
       </item>
-      <item row="7" column="0" colspan="2">
+      <item row="30" column="0" colspan="2">
        <layout class="QHBoxLayout" name="evaluationButtonsLayout">
         <item>
          <widget class="QPushButton" name="evaluateMarginsButton">
@@ -546,11 +546,577 @@
         </item>
        </layout>
       </item>
+      <item row="7" column="0">
+       <widget class="QLabel" name="coordinationSectionLabel">
+        <property name="text">
+         <string>Probe coordination constraints:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="8" column="0">
+       <widget class="QLabel" name="minInterProbeDistanceLabel">
+        <property name="text">
+         <string>Min inter-probe distance (mm):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="8" column="1">
+       <widget class="ctkDoubleSpinBox" name="minInterProbeDistanceSpinBox">
+        <property name="minimum">
+         <double>0.000000000000000</double>
+        </property>
+        <property name="maximum">
+         <double>500.000000000000000</double>
+        </property>
+        <property name="decimals">
+         <number>2</number>
+        </property>
+        <property name="singleStep">
+         <double>0.500000000000000</double>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>minInterProbeDistanceMm</string>
+        </property>
+       </widget>
+      </item>
+      <item row="9" column="0">
+       <widget class="QLabel" name="maxInterProbeDistanceLabel">
+        <property name="text">
+         <string>Max inter-probe distance (mm):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="9" column="1">
+       <widget class="ctkDoubleSpinBox" name="maxInterProbeDistanceSpinBox">
+        <property name="minimum">
+         <double>0.000000000000000</double>
+        </property>
+        <property name="maximum">
+         <double>1000.000000000000000</double>
+        </property>
+        <property name="decimals">
+         <number>2</number>
+        </property>
+        <property name="singleStep">
+         <double>0.500000000000000</double>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>maxInterProbeDistanceMm</string>
+        </property>
+       </widget>
+      </item>
+      <item row="10" column="0">
+       <widget class="QLabel" name="minEntryPointSpacingLabel">
+        <property name="text">
+         <string>Min entry-point spacing (mm):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="10" column="1">
+       <widget class="ctkDoubleSpinBox" name="minEntryPointSpacingSpinBox">
+        <property name="minimum">
+         <double>0.000000000000000</double>
+        </property>
+        <property name="maximum">
+         <double>500.000000000000000</double>
+        </property>
+        <property name="decimals">
+         <number>2</number>
+        </property>
+        <property name="singleStep">
+         <double>0.500000000000000</double>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>minEntryPointSpacingMm</string>
+        </property>
+       </widget>
+      </item>
+      <item row="11" column="0">
+       <widget class="QLabel" name="minTargetPointSpacingLabel">
+        <property name="text">
+         <string>Min target-point spacing (mm):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="11" column="1">
+       <widget class="ctkDoubleSpinBox" name="minTargetPointSpacingSpinBox">
+        <property name="minimum">
+         <double>0.000000000000000</double>
+        </property>
+        <property name="maximum">
+         <double>500.000000000000000</double>
+        </property>
+        <property name="decimals">
+         <number>2</number>
+        </property>
+        <property name="singleStep">
+         <double>0.500000000000000</double>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>minTargetPointSpacingMm</string>
+        </property>
+       </widget>
+      </item>
+      <item row="12" column="0">
+       <widget class="QLabel" name="maxParallelAngleLabel">
+        <property name="text">
+         <string>Max parallel angle (deg):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="12" column="1">
+       <widget class="ctkDoubleSpinBox" name="maxParallelAngleSpinBox">
+        <property name="minimum">
+         <double>0.000000000000000</double>
+        </property>
+        <property name="maximum">
+         <double>90.000000000000000</double>
+        </property>
+        <property name="decimals">
+         <number>2</number>
+        </property>
+        <property name="singleStep">
+         <double>0.500000000000000</double>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>maxParallelAngleDeg</string>
+        </property>
+       </widget>
+      </item>
+      <item row="13" column="0">
+       <widget class="QLabel" name="maxOverlapRedundancyLabel">
+        <property name="text">
+         <string>Max overlap redundancy (%):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="13" column="1">
+       <widget class="ctkDoubleSpinBox" name="maxOverlapRedundancySpinBox">
+        <property name="minimum">
+         <double>0.000000000000000</double>
+        </property>
+        <property name="maximum">
+         <double>100.000000000000000</double>
+        </property>
+        <property name="decimals">
+         <number>2</number>
+        </property>
+        <property name="singleStep">
+         <double>1.000000000000000</double>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>maxAllowedOverlapPercentBetweenPerProbeVolumes</string>
+        </property>
+       </widget>
+      </item>
+      <item row="14" column="0">
+       <widget class="QLabel" name="requireAllPairsLabel">
+        <property name="text">
+         <string>Require all probe pairs feasible:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="14" column="1">
+       <widget class="QCheckBox" name="requireAllProbePairsFeasibleCheckBox">
+        <property name="text">
+         <string/>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>requireAllProbePairsFeasible</string>
+        </property>
+       </widget>
+      </item>
+      <item row="15" column="0">
+       <widget class="QLabel" name="enableNoTouchCheckLabel">
+        <property name="text">
+         <string>Enable no-touch check:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="15" column="1">
+       <widget class="QCheckBox" name="enableNoTouchCheckBox">
+        <property name="text">
+         <string/>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>enableNoTouchCheck</string>
+        </property>
+       </widget>
+      </item>
+      <item row="16" column="0">
+       <widget class="QLabel" name="enableInterProbeDistanceRuleLabel">
+        <property name="text">
+         <string>Enable inter-probe distance rule:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="16" column="1">
+       <widget class="QCheckBox" name="enableInterProbeDistanceRuleCheckBox">
+        <property name="text">
+         <string/>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>enableInterProbeDistanceRule</string>
+        </property>
+       </widget>
+      </item>
+      <item row="17" column="0">
+       <widget class="QLabel" name="enableEntrySpacingRuleLabel">
+        <property name="text">
+         <string>Enable entry spacing rule:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="17" column="1">
+       <widget class="QCheckBox" name="enableEntrySpacingRuleCheckBox">
+        <property name="text">
+         <string/>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>enableEntrySpacingRule</string>
+        </property>
+       </widget>
+      </item>
+      <item row="18" column="0">
+       <widget class="QLabel" name="enableTargetSpacingRuleLabel">
+        <property name="text">
+         <string>Enable target spacing rule:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="18" column="1">
+       <widget class="QCheckBox" name="enableTargetSpacingRuleCheckBox">
+        <property name="text">
+         <string/>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>enableTargetSpacingRule</string>
+        </property>
+       </widget>
+      </item>
+      <item row="19" column="0">
+       <widget class="QLabel" name="enableAngleRuleLabel">
+        <property name="text">
+         <string>Enable parallel-angle rule:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="19" column="1">
+       <widget class="QCheckBox" name="enableAngleRuleCheckBox">
+        <property name="text">
+         <string/>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>enableAngleRule</string>
+        </property>
+       </widget>
+      </item>
+      <item row="20" column="0">
+       <widget class="QLabel" name="enableOverlapRuleLabel">
+        <property name="text">
+         <string>Enable overlap redundancy rule:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="20" column="1">
+       <widget class="QCheckBox" name="enableOverlapRuleCheckBox">
+        <property name="text">
+         <string/>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>enableOverlapRule</string>
+        </property>
+       </widget>
+      </item>
+      <item row="21" column="0" colspan="2">
+       <layout class="QHBoxLayout" name="probeCoordinationControlsLayout">
+        <item>
+         <widget class="QPushButton" name="evaluateProbeCoordinationButton">
+          <property name="enabled">
+           <bool>false</bool>
+          </property>
+          <property name="text">
+           <string>Evaluate Probe Coordination</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLabel" name="probeCoordinationStatusLabel">
+          <property name="text">
+           <string>Probe coordination not evaluated.</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
      </layout>
-    </widget>
-   </item>
-   <item>
-    <spacer name="verticalSpacer">
+   </widget>
+  </item>
+  <item>
+   <widget class="ctkCollapsibleButton" name="exportCollapsibleButton">
+    <property name="text">
+     <string>Export</string>
+    </property>
+    <layout class="QFormLayout" name="exportFormLayout">
+     <item row="0" column="0">
+      <widget class="QLabel" name="exportModeLabel">
+       <property name="text">
+        <string>Export mode:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="0" column="1">
+      <widget class="QComboBox" name="exportModeComboBox">
+       <property name="SlicerParameterName" stdset="0">
+        <string>exportMode</string>
+       </property>
+       <item>
+        <property name="text">
+         <string>CurrentWorkingPlan</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>SelectedScenario</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>CurrentRecommendationContext</string>
+        </property>
+       </item>
+      </widget>
+     </item>
+     <item row="1" column="0">
+      <widget class="QLabel" name="selectedExportScenarioIDLabel">
+       <property name="text">
+        <string>Selected scenario ID:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="1" column="1">
+      <widget class="QLineEdit" name="selectedExportScenarioIDLineEdit">
+       <property name="placeholderText">
+        <string>Optional unless SelectedScenario mode</string>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>selectedExportScenarioID</string>
+       </property>
+      </widget>
+     </item>
+     <item row="2" column="0">
+      <widget class="QLabel" name="exportBaseNameLabel">
+       <property name="text">
+        <string>Export base name:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="2" column="1">
+      <widget class="QLineEdit" name="exportBaseNameLineEdit">
+       <property name="text">
+        <string>SV3D_Export</string>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>exportBaseName</string>
+       </property>
+      </widget>
+     </item>
+     <item row="3" column="0">
+      <widget class="QLabel" name="exportDirectoryLabel">
+       <property name="text">
+        <string>Export directory:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="3" column="1">
+      <widget class="QLineEdit" name="exportDirectoryLineEdit">
+       <property name="placeholderText">
+        <string>Defaults to Slicer temp export folder when empty</string>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>lastExportDirectory</string>
+       </property>
+      </widget>
+     </item>
+     <item row="4" column="0">
+      <widget class="QLabel" name="includeWorkingPlanLabel">
+       <property name="text">
+        <string>Include working-plan tables:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="4" column="1">
+      <widget class="QCheckBox" name="includeWorkingPlanCheckBox">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>includeWorkingPlan</string>
+       </property>
+      </widget>
+     </item>
+     <item row="5" column="0">
+      <widget class="QLabel" name="includeSelectedScenarioLabel">
+       <property name="text">
+        <string>Include selected scenario summary:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="5" column="1">
+      <widget class="QCheckBox" name="includeSelectedScenarioCheckBox">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>includeSelectedScenario</string>
+       </property>
+      </widget>
+     </item>
+     <item row="6" column="0">
+      <widget class="QLabel" name="includeScenarioComparisonLabel">
+       <property name="text">
+        <string>Include scenario comparison tables:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="6" column="1">
+      <widget class="QCheckBox" name="includeScenarioComparisonCheckBox">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>includeScenarioComparison</string>
+       </property>
+      </widget>
+     </item>
+     <item row="7" column="0">
+      <widget class="QLabel" name="includeRecommendationOutputsLabel">
+       <property name="text">
+        <string>Include recommendation outputs:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="7" column="1">
+      <widget class="QCheckBox" name="includeRecommendationOutputsCheckBox">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>includeRecommendationOutputs</string>
+       </property>
+      </widget>
+     </item>
+     <item row="8" column="0">
+      <widget class="QLabel" name="includeTrajectoryTablesLabel">
+       <property name="text">
+        <string>Include trajectory tables:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="8" column="1">
+      <widget class="QCheckBox" name="includeTrajectoryTablesCheckBox">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>includeTrajectoryTables</string>
+       </property>
+      </widget>
+     </item>
+     <item row="9" column="0">
+      <widget class="QLabel" name="includeSafetyTablesLabel">
+       <property name="text">
+        <string>Include safety tables:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="9" column="1">
+      <widget class="QCheckBox" name="includeSafetyTablesCheckBox">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>includeSafetyTables</string>
+       </property>
+      </widget>
+     </item>
+     <item row="10" column="0">
+      <widget class="QLabel" name="includeCoverageTablesLabel">
+       <property name="text">
+        <string>Include coverage tables:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="10" column="1">
+      <widget class="QCheckBox" name="includeCoverageTablesCheckBox">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>includeCoverageTables</string>
+       </property>
+      </widget>
+     </item>
+     <item row="11" column="0">
+      <widget class="QLabel" name="includeFeasibilityTablesLabel">
+       <property name="text">
+        <string>Include feasibility tables:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="11" column="1">
+      <widget class="QCheckBox" name="includeFeasibilityTablesCheckBox">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>includeFeasibilityTables</string>
+       </property>
+      </widget>
+     </item>
+     <item row="12" column="0">
+      <widget class="QLabel" name="includeCoordinationTablesLabel">
+       <property name="text">
+        <string>Include coordination tables:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="12" column="1">
+      <widget class="QCheckBox" name="includeCoordinationTablesCheckBox">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>includeCoordinationTables</string>
+       </property>
+      </widget>
+     </item>
+     <item row="13" column="0" colspan="2">
+      <layout class="QHBoxLayout" name="exportControlsLayout">
+       <item>
+        <widget class="QPushButton" name="exportBundleButton">
+         <property name="enabled">
+          <bool>true</bool>
+         </property>
+         <property name="text">
+          <string>Export Bundle</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="exportStatusLabel">
+         <property name="text">
+          <string>No export run yet.</string>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </item>
+    </layout>
+   </widget>
+  </item>
+  <item>
+   <spacer name="verticalSpacer">
      <property name="orientation">
       <enum>Qt::Vertical</enum>
      </property>

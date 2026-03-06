@@ -35,8 +35,16 @@ GENERATED_TRAJECTORY_LINE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedTraject
 GENERATED_COMBINED_PROBE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedCombinedProbe"
 GENERATED_MARGIN_MODEL_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedMarginModel"
 GENERATED_RESULT_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedResultTable"
+GENERATED_TRAJECTORY_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedTrajectorySummaryTable"
+GENERATED_PLAN_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedPlanSummaryTable"
+GENERATED_MARGIN_THRESHOLD_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedMarginThresholdSummaryTable"
+GENERATED_STRUCTURE_SAFETY_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedStructureSafetySummaryTable"
+GENERATED_STRUCTURE_SAFETY_THRESHOLD_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedStructureSafetyThresholdSummaryTable"
 TEMP_PROBE_MARGIN_INPUT_ATTRIBUTE = "SurgicalVision3D_Planner.TempProbeMarginInput"
 TEMP_TUMOR_MARGIN_INPUT_ATTRIBUTE = "SurgicalVision3D_Planner.TempTumorMarginInput"
+TEMP_PROBE_SAFETY_INPUT_ATTRIBUTE = "SurgicalVision3D_Planner.TempProbeSafetyInput"
+TEMP_STRUCTURE_SAFETY_INPUT_ATTRIBUTE = "SurgicalVision3D_Planner.TempStructureSafetyInput"
+TEMP_STRUCTURE_SAFETY_DISTANCE_OUTPUT_ATTRIBUTE = "SurgicalVision3D_Planner.TempStructureSafetyDistanceOutput"
 SIGNED_DISTANCE_ARRAY_NAME = "Signed"
 SIGNED_DISTANCE_BACKUP_ARRAY_NAME = "SignedOriginal"
 DEFAULT_MARGIN_COLOR_NODE_ID = "vtkMRMLColorTableNode2"
@@ -45,6 +53,14 @@ MARGIN_MODEL_NODE_NAME = "SV3D Signed Margin Model"
 MARGIN_TABLE_NODE_NAME = "SV3D Signed Margin Table"
 TEMP_PROBE_MODEL_NODE_NAME = "SV3D Temp Probe Margin Input"
 TEMP_TUMOR_MODEL_NODE_NAME = "SV3D Temp Tumor Margin Input"
+TRAJECTORY_SUMMARY_TABLE_NODE_NAME = "SV3D Trajectory Summary"
+PLAN_SUMMARY_TABLE_NODE_NAME = "SV3D Plan Summary"
+MARGIN_THRESHOLD_SUMMARY_TABLE_NODE_NAME = "SV3D Margin Threshold Summary"
+STRUCTURE_SAFETY_SUMMARY_TABLE_NODE_NAME = "SV3D Structure Safety Summary"
+STRUCTURE_SAFETY_THRESHOLD_SUMMARY_TABLE_NODE_NAME = "SV3D Structure Safety Threshold Summary"
+TEMP_PROBE_SAFETY_MODEL_NODE_NAME = "SV3D Temp Probe Safety Input"
+TEMP_STRUCTURE_SAFETY_MODEL_NODE_NAME = "SV3D Temp Structure Safety Input"
+TEMP_STRUCTURE_SAFETY_DISTANCE_MODEL_NODE_NAME = "SV3D Temp Structure Safety Distance"
 
 
 def _normalize_vector(vector: Sequence[float]) -> np.ndarray:
@@ -147,12 +163,18 @@ class SurgicalVision3D_PlannerParameterNode:
     referenceProbeSegmentation: vtkMRMLSegmentationNode | None = None
     endpointsMarkups: vtkMRMLMarkupsFiducialNode | None = None
     tumorSegmentation: vtkMRMLSegmentationNode | None = None
+    riskStructuresSegmentation: vtkMRMLSegmentationNode | None = None
     nativeFiducials: vtkMRMLMarkupsFiducialNode | None = None
     registeredFiducials: vtkMRMLMarkupsFiducialNode | None = None
     combinedProbeSegmentation: vtkMRMLSegmentationNode | None = None
     outputMarginModel: vtkMRMLModelNode | None = None
     resultTable: vtkMRMLTableNode | None = None
     tumorTransform: vtkMRMLTransformNode | None = None
+    trajectorySummaryTable: vtkMRMLTableNode | None = None
+    planSummaryTable: vtkMRMLTableNode | None = None
+    marginThresholdSummaryTable: vtkMRMLTableNode | None = None
+    structureSafetySummaryTable: vtkMRMLTableNode | None = None
+    structureSafetyThresholdSummaryTable: vtkMRMLTableNode | None = None
 
     createTrajectoryLinesOnPlacement: bool = True
     clearPreviousGeneratedProbes: bool = True
@@ -193,6 +215,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             "probeSegmentationSelector",
             "endpointsMarkupsSelector",
             "tumorSegmentationSelector",
+            "riskStructuresSegmentationSelector",
             "nativeFiducialsSelector",
             "registeredFiducialsSelector",
             "combinedProbeSegmentationSelector",
@@ -217,6 +240,10 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         self.ui.evaluateMarginsButton.connect("clicked(bool)", self.onEvaluateMarginsButton)
         self.ui.recolorMarginsButton.connect("clicked(bool)", self.onRecolorMarginsButton)
         self.ui.resetMarginColorsButton.connect("clicked(bool)", self.onResetMarginColorsButton)
+        self.ui.riskStructuresSegmentationSelector.connect(
+            "currentNodeChanged(vtkMRMLNode*)",
+            self.onRiskStructuresSegmentationChanged,
+        )
 
         self.initializeParameterNode()
 
@@ -271,21 +298,60 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         if serializedLineNodeIDs != self._parameterNode.generatedTrajectoryLineIDs:
             self._parameterNode.generatedTrajectoryLineIDs = serializedLineNodeIDs
 
-        for nodeFieldName in ("combinedProbeSegmentation", "outputMarginModel", "resultTable", "tumorTransform"):
+        for nodeFieldName in (
+            "combinedProbeSegmentation",
+            "outputMarginModel",
+            "resultTable",
+            "tumorTransform",
+            "riskStructuresSegmentation",
+            "trajectorySummaryTable",
+            "planSummaryTable",
+            "marginThresholdSummaryTable",
+            "structureSafetySummaryTable",
+            "structureSafetyThresholdSummaryTable",
+        ):
             node = getattr(self._parameterNode, nodeFieldName)
             if node and not slicer.mrmlScene.IsNodePresent(node):
                 setattr(self._parameterNode, nodeFieldName, None)
+
+    def _clearOwnedSafetyOutputs(self, clearReferences: bool = False) -> None:
+        if not self.logic or not self._parameterNode:
+            return
+
+        if self.logic.removeNodeIfOwned(
+            self._parameterNode.structureSafetySummaryTable,
+            GENERATED_STRUCTURE_SAFETY_SUMMARY_TABLE_ATTRIBUTE,
+        ) or clearReferences:
+            self._parameterNode.structureSafetySummaryTable = None
+        if self.logic.removeNodeIfOwned(
+            self._parameterNode.structureSafetyThresholdSummaryTable,
+            GENERATED_STRUCTURE_SAFETY_THRESHOLD_TABLE_ATTRIBUTE,
+        ) or clearReferences:
+            self._parameterNode.structureSafetyThresholdSummaryTable = None
 
     def _clearOwnedDerivedOutputs(self, clearReferences: bool = False) -> None:
         if not self.logic or not self._parameterNode:
             return
 
+        if self.logic.removeNodeIfOwned(
+            self._parameterNode.trajectorySummaryTable,
+            GENERATED_TRAJECTORY_SUMMARY_TABLE_ATTRIBUTE,
+        ) or clearReferences:
+            self._parameterNode.trajectorySummaryTable = None
         if self.logic.removeNodeIfOwned(self._parameterNode.combinedProbeSegmentation, GENERATED_COMBINED_PROBE_ATTRIBUTE) or clearReferences:
             self._parameterNode.combinedProbeSegmentation = None
         if self.logic.removeNodeIfOwned(self._parameterNode.outputMarginModel, GENERATED_MARGIN_MODEL_ATTRIBUTE) or clearReferences:
             self._parameterNode.outputMarginModel = None
         if self.logic.removeNodeIfOwned(self._parameterNode.resultTable, GENERATED_RESULT_TABLE_ATTRIBUTE) or clearReferences:
             self._parameterNode.resultTable = None
+        if self.logic.removeNodeIfOwned(self._parameterNode.planSummaryTable, GENERATED_PLAN_SUMMARY_TABLE_ATTRIBUTE) or clearReferences:
+            self._parameterNode.planSummaryTable = None
+        if self.logic.removeNodeIfOwned(
+            self._parameterNode.marginThresholdSummaryTable,
+            GENERATED_MARGIN_THRESHOLD_TABLE_ATTRIBUTE,
+        ) or clearReferences:
+            self._parameterNode.marginThresholdSummaryTable = None
+        self._clearOwnedSafetyOutputs(clearReferences=clearReferences)
 
     def _updateButtonStates(self, caller=None, event=None) -> None:
         if not self._parameterNode:
@@ -365,6 +431,16 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 generatedLineNodeIDs = self.logic.createTrajectoryLines(trajectories, clearExisting=True)
                 self._parameterNode.generatedTrajectoryLineIDs = self.logic.serializeNodeIDs(generatedLineNodeIDs)
 
+            trajectorySummaryTable = self.logic.createOrReuseOwnedOutputNode(
+                "vtkMRMLTableNode",
+                TRAJECTORY_SUMMARY_TABLE_NODE_NAME,
+                GENERATED_TRAJECTORY_SUMMARY_TABLE_ATTRIBUTE,
+                self._parameterNode.trajectorySummaryTable,
+            )
+            trajectoryMetrics = self.logic.computeTrajectoryMetrics(trajectories)
+            self.logic.populateTrajectorySummaryTable(trajectorySummaryTable, trajectoryMetrics)
+            self._parameterNode.trajectorySummaryTable = trajectorySummaryTable
+
             self._updateButtonStates()
 
     def onCreateTrajectoryLinesButton(self) -> None:
@@ -400,8 +476,16 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             # Merged ablation geometry changed, margin outputs are now stale.
             self.logic.removeNodeIfOwned(self._parameterNode.outputMarginModel, GENERATED_MARGIN_MODEL_ATTRIBUTE)
             self.logic.removeNodeIfOwned(self._parameterNode.resultTable, GENERATED_RESULT_TABLE_ATTRIBUTE)
+            self.logic.removeNodeIfOwned(self._parameterNode.planSummaryTable, GENERATED_PLAN_SUMMARY_TABLE_ATTRIBUTE)
+            self.logic.removeNodeIfOwned(
+                self._parameterNode.marginThresholdSummaryTable,
+                GENERATED_MARGIN_THRESHOLD_TABLE_ATTRIBUTE,
+            )
+            self._clearOwnedSafetyOutputs(clearReferences=True)
             self._parameterNode.outputMarginModel = None
             self._parameterNode.resultTable = None
+            self._parameterNode.planSummaryTable = None
+            self._parameterNode.marginThresholdSummaryTable = None
             self._updateButtonStates()
 
     def onRegisterTumorButton(self) -> None:
@@ -423,6 +507,13 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 raise RuntimeError("Module logic is not initialized.")
             self.logic.hardenTumorTransform(self._parameterNode.tumorSegmentation)
             self._updateButtonStates()
+
+    def onRiskStructuresSegmentationChanged(self, _node=None) -> None:
+        if not self.logic or not self._parameterNode:
+            return
+
+        self._clearOwnedSafetyOutputs(clearReferences=True)
+        self._updateButtonStates()
 
     def onEvaluateMarginsButton(self) -> None:
         with slicer.util.tryWithErrorDisplay(_("Failed to evaluate margins."), waitCursor=True):
@@ -450,6 +541,71 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self._parameterNode.outputMarginModel = outputMarginModel
             self._parameterNode.resultTable = resultTable
             logging.info("Margin summary: %s", summary)
+
+            signedMarginValues = self.logic.getSignedMarginValues(outputMarginModel)
+            trajectoryCount = len(
+                self.logic.resolveExistingNodeIDs(
+                    self.logic.deserializeNodeIDs(self._parameterNode.generatedProbeNodeIDs)
+                )
+            )
+            if trajectoryCount <= 0:
+                trajectoryCount = self.logic.tableNodeRowCount(self._parameterNode.trajectorySummaryTable)
+
+            tumorSegmentID, tumorSegmentName = self.logic.getWorkingSegmentInfo(
+                self._parameterNode.tumorSegmentation,
+                "plan summary",
+            )
+            planSummary = self.logic.computeSignedMarginSummary(
+                signedMarginValues,
+                trajectoryCount=trajectoryCount,
+                tumorSegmentID=tumorSegmentID,
+                tumorSegmentName=tumorSegmentName,
+            )
+            thresholdSummary = self.logic.computeMarginThresholdSummary(signedMarginValues)
+
+            planSummaryTable = self.logic.createOrReuseOwnedOutputNode(
+                "vtkMRMLTableNode",
+                PLAN_SUMMARY_TABLE_NODE_NAME,
+                GENERATED_PLAN_SUMMARY_TABLE_ATTRIBUTE,
+                self._parameterNode.planSummaryTable,
+            )
+            marginThresholdSummaryTable = self.logic.createOrReuseOwnedOutputNode(
+                "vtkMRMLTableNode",
+                MARGIN_THRESHOLD_SUMMARY_TABLE_NODE_NAME,
+                GENERATED_MARGIN_THRESHOLD_TABLE_ATTRIBUTE,
+                self._parameterNode.marginThresholdSummaryTable,
+            )
+            self.logic.populatePlanSummaryTable(planSummaryTable, planSummary)
+            self.logic.populateMarginThresholdSummaryTable(marginThresholdSummaryTable, thresholdSummary)
+            self._parameterNode.planSummaryTable = planSummaryTable
+            self._parameterNode.marginThresholdSummaryTable = marginThresholdSummaryTable
+
+            structureSafetySummaryRows, structureSafetyThresholdRows = self.logic.evaluateStructureSafety(
+                self._parameterNode.riskStructuresSegmentation,
+                probeSegmentation,
+            )
+            if len(structureSafetySummaryRows) > 0:
+                structureSafetySummaryTable = self.logic.createOrReuseOwnedOutputNode(
+                    "vtkMRMLTableNode",
+                    STRUCTURE_SAFETY_SUMMARY_TABLE_NODE_NAME,
+                    GENERATED_STRUCTURE_SAFETY_SUMMARY_TABLE_ATTRIBUTE,
+                    self._parameterNode.structureSafetySummaryTable,
+                )
+                structureSafetyThresholdSummaryTable = self.logic.createOrReuseOwnedOutputNode(
+                    "vtkMRMLTableNode",
+                    STRUCTURE_SAFETY_THRESHOLD_SUMMARY_TABLE_NODE_NAME,
+                    GENERATED_STRUCTURE_SAFETY_THRESHOLD_TABLE_ATTRIBUTE,
+                    self._parameterNode.structureSafetyThresholdSummaryTable,
+                )
+                self.logic.populateStructureSafetySummaryTable(structureSafetySummaryTable, structureSafetySummaryRows)
+                self.logic.populateStructureSafetyThresholdSummaryTable(
+                    structureSafetyThresholdSummaryTable,
+                    structureSafetyThresholdRows,
+                )
+                self._parameterNode.structureSafetySummaryTable = structureSafetySummaryTable
+                self._parameterNode.structureSafetyThresholdSummaryTable = structureSafetyThresholdSummaryTable
+            else:
+                self._clearOwnedSafetyOutputs(clearReferences=True)
             self._updateButtonStates()
 
     def onRecolorMarginsButton(self) -> None:
@@ -522,6 +678,137 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
                 seenNodeIDs.add(nodeID)
                 mergedNodeIDs.append(nodeID)
         return mergedNodeIDs
+
+    @staticmethod
+    def tableNodeRowCount(tableNode: vtkMRMLTableNode | None) -> int:
+        if not tableNode or not slicer.mrmlScene.IsNodePresent(tableNode):
+            return 0
+        table = tableNode.GetTable()
+        if table is None:
+            return 0
+        return int(table.GetNumberOfRows())
+
+    @staticmethod
+    def computeTrajectoryMetrics(trajectories: Sequence[ProbeTrajectory]) -> list[dict[str, float | int | str]]:
+        metrics: list[dict[str, float | int | str]] = []
+        for trajectory in trajectories:
+            metrics.append(
+                {
+                    "TrajectoryIndex": int(trajectory.trajectoryIndex + 1),
+                    "EntryR": float(trajectory.entryPointRAS[0]),
+                    "EntryA": float(trajectory.entryPointRAS[1]),
+                    "EntryS": float(trajectory.entryPointRAS[2]),
+                    "TargetR": float(trajectory.targetPointRAS[0]),
+                    "TargetA": float(trajectory.targetPointRAS[1]),
+                    "TargetS": float(trajectory.targetPointRAS[2]),
+                    "DirR": float(trajectory.directionVector[0]),
+                    "DirA": float(trajectory.directionVector[1]),
+                    "DirS": float(trajectory.directionVector[2]),
+                    "LengthMm": float(trajectory.lengthMm),
+                }
+            )
+        return metrics
+
+    @staticmethod
+    def computeSignedMarginSummary(
+        signedMarginValues: Sequence[float],
+        trajectoryCount: int,
+        tumorSegmentID: str,
+        tumorSegmentName: str,
+    ) -> dict[str, float | int | str]:
+        if len(signedMarginValues) == 0:
+            raise ValueError("Signed margin summary cannot be computed because no signed margin values are available.")
+
+        signedValues = np.asarray(signedMarginValues, dtype=float)
+        signedValues = signedValues[np.isfinite(signedValues)]
+        if signedValues.size == 0:
+            raise ValueError("Signed margin summary cannot be computed because signed margin values are invalid.")
+
+        return {
+            "TrajectoryCount": int(trajectoryCount),
+            "TumorSegmentID": tumorSegmentID,
+            "TumorSegmentName": tumorSegmentName,
+            "MinSignedMarginMm": float(np.min(signedValues)),
+            "MeanSignedMarginMm": float(np.mean(signedValues)),
+            "MedianSignedMarginMm": float(np.median(signedValues)),
+            "P20SignedMarginMm": float(np.quantile(signedValues, 0.20)),
+            "P80SignedMarginMm": float(np.quantile(signedValues, 0.80)),
+        }
+
+    @staticmethod
+    def computeMarginThresholdSummary(signedMarginValues: Sequence[float]) -> list[dict[str, float | int | str]]:
+        if len(signedMarginValues) == 0:
+            raise ValueError("Margin threshold summary cannot be computed because no signed margin values are available.")
+
+        signedValues = np.asarray(signedMarginValues, dtype=float)
+        signedValues = signedValues[np.isfinite(signedValues)]
+        if signedValues.size == 0:
+            raise ValueError("Margin threshold summary cannot be computed because signed margin values are invalid.")
+
+        totalValueCount = int(signedValues.size)
+        thresholdBuckets = [
+            ("< 0 mm", int(np.count_nonzero(signedValues < 0.0))),
+            ("< 2 mm", int(np.count_nonzero(signedValues < 2.0))),
+            ("< 5 mm", int(np.count_nonzero(signedValues < 5.0))),
+            (">= 5 mm", int(np.count_nonzero(signedValues >= 5.0))),
+        ]
+
+        summaryRows: list[dict[str, float | int | str]] = []
+        for bucketLabel, bucketCount in thresholdBuckets:
+            percentage = (100.0 * bucketCount / totalValueCount) if totalValueCount else 0.0
+            summaryRows.append(
+                {
+                    "Bucket": bucketLabel,
+                    "Count": int(bucketCount),
+                    "Percent": float(percentage),
+                }
+            )
+        return summaryRows
+
+    @staticmethod
+    def computeDistanceSummary(distanceValues: Sequence[float]) -> dict[str, float]:
+        if len(distanceValues) == 0:
+            raise ValueError("Distance summary cannot be computed because no distance values are available.")
+
+        values = np.asarray(distanceValues, dtype=float)
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            raise ValueError("Distance summary cannot be computed because distance values are invalid.")
+
+        return {
+            "MinDistanceMm": float(np.min(values)),
+            "MeanDistanceMm": float(np.mean(values)),
+            "MedianDistanceMm": float(np.median(values)),
+            "P20DistanceMm": float(np.quantile(values, 0.20)),
+            "P80DistanceMm": float(np.quantile(values, 0.80)),
+        }
+
+    @staticmethod
+    def computeDistanceThresholdSummary(distanceValues: Sequence[float]) -> dict[str, float | int]:
+        if len(distanceValues) == 0:
+            raise ValueError("Distance threshold summary cannot be computed because no distance values are available.")
+
+        values = np.asarray(distanceValues, dtype=float)
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            raise ValueError("Distance threshold summary cannot be computed because distance values are invalid.")
+
+        totalValueCount = int(values.size)
+        countBelow0 = int(np.count_nonzero(values < 0.0))
+        countBelow2 = int(np.count_nonzero(values < 2.0))
+        countBelow5 = int(np.count_nonzero(values < 5.0))
+        countAtLeast5 = int(np.count_nonzero(values >= 5.0))
+
+        return {
+            "CountBelow0Mm": countBelow0,
+            "PercentBelow0Mm": float(100.0 * countBelow0 / totalValueCount),
+            "CountBelow2Mm": countBelow2,
+            "PercentBelow2Mm": float(100.0 * countBelow2 / totalValueCount),
+            "CountBelow5Mm": countBelow5,
+            "PercentBelow5Mm": float(100.0 * countBelow5 / totalValueCount),
+            "CountAtLeast5Mm": countAtLeast5,
+            "PercentAtLeast5Mm": float(100.0 * countAtLeast5 / totalValueCount),
+        }
 
     @staticmethod
     def extractTrajectoriesFromPointPairs(
@@ -842,6 +1129,94 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             self.removeNodeIfOwned(tempProbeModel, TEMP_PROBE_MARGIN_INPUT_ATTRIBUTE)
             self.removeNodeIfOwned(tempTumorModel, TEMP_TUMOR_MARGIN_INPUT_ATTRIBUTE)
 
+    def evaluateStructureSafety(
+        self,
+        riskStructuresSegmentation: vtkMRMLSegmentationNode | None,
+        probeSegmentation: vtkMRMLSegmentationNode | None,
+    ) -> tuple[list[dict[str, float | int | str]], list[dict[str, float | int | str]]]:
+        if riskStructuresSegmentation is None:
+            return [], []
+        if not probeSegmentation:
+            raise ValueError("Combined probe segmentation node is required for structure safety evaluation.")
+        if not hasattr(slicer.modules, "modeltomodeldistance"):
+            raise RuntimeError("ModelToModelDistance module is not available.")
+
+        riskSegments = self.getValidSegmentationSegments(
+            riskStructuresSegmentation,
+            "structure safety evaluation",
+        )
+        tempProbeModel = self.createOrReuseOwnedOutputNode(
+            "vtkMRMLModelNode",
+            TEMP_PROBE_SAFETY_MODEL_NODE_NAME,
+            TEMP_PROBE_SAFETY_INPUT_ATTRIBUTE,
+        )
+        tempStructureModel = self.createOrReuseOwnedOutputNode(
+            "vtkMRMLModelNode",
+            TEMP_STRUCTURE_SAFETY_MODEL_NODE_NAME,
+            TEMP_STRUCTURE_SAFETY_INPUT_ATTRIBUTE,
+        )
+        tempDistanceModel = self.createOrReuseOwnedOutputNode(
+            "vtkMRMLModelNode",
+            TEMP_STRUCTURE_SAFETY_DISTANCE_MODEL_NODE_NAME,
+            TEMP_STRUCTURE_SAFETY_DISTANCE_OUTPUT_ATTRIBUTE,
+        )
+
+        probeModel = self.segmentationFirstSegmentToModel(
+            probeSegmentation,
+            TEMP_PROBE_SAFETY_MODEL_NODE_NAME,
+            outputModelNode=tempProbeModel,
+        )
+
+        structureSafetySummaryRows: list[dict[str, float | int | str]] = []
+        structureSafetyThresholdRows: list[dict[str, float | int | str]] = []
+        try:
+            for segmentInfo in riskSegments:
+                segmentID = str(segmentInfo["segmentID"])
+                segmentName = str(segmentInfo["segmentName"])
+                self.segmentationSegmentToModel(
+                    riskStructuresSegmentation,
+                    segmentID,
+                    TEMP_STRUCTURE_SAFETY_MODEL_NODE_NAME,
+                    outputModelNode=tempStructureModel,
+                )
+
+                # Signed convention from ModelToModelDistance:
+                # negative values indicate structure points inside/overlapping ablation geometry.
+                distanceParameters = {
+                    "vtkFile1": tempStructureModel.GetID(),
+                    "vtkFile2": probeModel.GetID(),
+                    "distanceType": "signed_closest_point",
+                    "vtkOutput": tempDistanceModel.GetID(),
+                }
+                cliNode = slicer.cli.runSync(slicer.modules.modeltomodeldistance, None, distanceParameters)
+                if cliNode:
+                    slicer.mrmlScene.RemoveNode(cliNode)
+
+                signedDistanceValues = self.getSignedMarginValues(tempDistanceModel)
+                distanceSummary = self.computeDistanceSummary(signedDistanceValues)
+                thresholdSummary = self.computeDistanceThresholdSummary(signedDistanceValues)
+
+                structureSafetySummaryRows.append(
+                    {
+                        "StructureSegmentID": segmentID,
+                        "StructureName": segmentName,
+                        **distanceSummary,
+                    }
+                )
+                structureSafetyThresholdRows.append(
+                    {
+                        "StructureSegmentID": segmentID,
+                        "StructureName": segmentName,
+                        **thresholdSummary,
+                    }
+                )
+        finally:
+            self.removeNodeIfOwned(tempProbeModel, TEMP_PROBE_SAFETY_INPUT_ATTRIBUTE)
+            self.removeNodeIfOwned(tempStructureModel, TEMP_STRUCTURE_SAFETY_INPUT_ATTRIBUTE)
+            self.removeNodeIfOwned(tempDistanceModel, TEMP_STRUCTURE_SAFETY_DISTANCE_OUTPUT_ATTRIBUTE)
+
+        return structureSafetySummaryRows, structureSafetyThresholdRows
+
     def recolorMarginModel(self, marginModelNode: vtkMRMLModelNode | None, thresholds: Sequence[float]) -> None:
         if not marginModelNode:
             raise ValueError("Margin model node is required.")
@@ -919,15 +1294,311 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             copiedArray.SetName(sourceArray.GetName())
             tableNode.AddColumn(copiedArray)
 
-    def segmentationFirstSegmentToModel(
+    def getSignedMarginValues(self, marginModelNode: vtkMRMLModelNode | None) -> list[float]:
+        if not marginModelNode:
+            raise ValueError("Margin model node is required.")
+
+        signedDistanceArray = self.getSignedDistanceBackupArray(marginModelNode)
+        if signedDistanceArray is None:
+            signedDistanceArray = self.getSignedDistanceArray(marginModelNode)
+
+        signedMarginValues: list[float] = []
+        invalidValueCount = 0
+        for pointIndex in range(_data_array_value_count(signedDistanceArray)):
+            signedValue = float(signedDistanceArray.GetValue(pointIndex))
+            if math.isfinite(signedValue):
+                signedMarginValues.append(signedValue)
+            else:
+                invalidValueCount += 1
+
+        if invalidValueCount > 0:
+            logging.warning("Ignored %d non-finite signed-margin values during summary computation.", invalidValueCount)
+
+        if len(signedMarginValues) == 0:
+            raise RuntimeError("Signed margin model contains no finite scalar values for summary computation.")
+        return signedMarginValues
+
+    def getWorkingSegmentInfo(self, segmentationNode: vtkMRMLSegmentationNode | None, operationName: str) -> tuple[str, str]:
+        segmentID = self.getWorkingSegmentID(segmentationNode, operationName)
+        segment = segmentationNode.GetSegmentation().GetSegment(segmentID) if segmentationNode else None
+        segmentName = segment.GetName() if segment and segment.GetName() else segmentID
+        return segmentID, segmentName
+
+    def populateTrajectorySummaryTable(
+        self,
+        tableNode: vtkMRMLTableNode | None,
+        trajectoryMetrics: Sequence[dict[str, float | int | str]],
+    ) -> None:
+        if not tableNode:
+            raise ValueError("Trajectory summary table node is required.")
+
+        tableNode.RemoveAllColumns()
+        self._addNumericColumn(
+            tableNode,
+            "Trajectory Index",
+            [int(metric.get("TrajectoryIndex", 0)) for metric in trajectoryMetrics],
+            integer=True,
+        )
+        self._addNumericColumn(tableNode, "Entry R (mm)", [float(metric.get("EntryR", 0.0)) for metric in trajectoryMetrics])
+        self._addNumericColumn(tableNode, "Entry A (mm)", [float(metric.get("EntryA", 0.0)) for metric in trajectoryMetrics])
+        self._addNumericColumn(tableNode, "Entry S (mm)", [float(metric.get("EntryS", 0.0)) for metric in trajectoryMetrics])
+        self._addNumericColumn(tableNode, "Target R (mm)", [float(metric.get("TargetR", 0.0)) for metric in trajectoryMetrics])
+        self._addNumericColumn(tableNode, "Target A (mm)", [float(metric.get("TargetA", 0.0)) for metric in trajectoryMetrics])
+        self._addNumericColumn(tableNode, "Target S (mm)", [float(metric.get("TargetS", 0.0)) for metric in trajectoryMetrics])
+        self._addNumericColumn(tableNode, "Direction R", [float(metric.get("DirR", 0.0)) for metric in trajectoryMetrics])
+        self._addNumericColumn(tableNode, "Direction A", [float(metric.get("DirA", 0.0)) for metric in trajectoryMetrics])
+        self._addNumericColumn(tableNode, "Direction S", [float(metric.get("DirS", 0.0)) for metric in trajectoryMetrics])
+        self._addNumericColumn(tableNode, "Length (mm)", [float(metric.get("LengthMm", 0.0)) for metric in trajectoryMetrics])
+
+    def populatePlanSummaryTable(self, tableNode: vtkMRMLTableNode | None, planSummary: dict[str, float | int | str]) -> None:
+        if not tableNode:
+            raise ValueError("Plan summary table node is required.")
+
+        tableNode.RemoveAllColumns()
+        self._addNumericColumn(
+            tableNode,
+            "Trajectory Count",
+            [int(planSummary.get("TrajectoryCount", 0))],
+            integer=True,
+        )
+        self._addStringColumn(tableNode, "Tumor Segment ID", [planSummary.get("TumorSegmentID", "")])
+        self._addStringColumn(tableNode, "Tumor Segment Name", [planSummary.get("TumorSegmentName", "")])
+        self._addNumericColumn(
+            tableNode,
+            "Minimum Signed Margin (mm)",
+            [float(planSummary.get("MinSignedMarginMm", float("nan")))],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Mean Signed Margin (mm)",
+            [float(planSummary.get("MeanSignedMarginMm", float("nan")))],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Median Signed Margin (mm)",
+            [float(planSummary.get("MedianSignedMarginMm", float("nan")))],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "P20 Signed Margin (mm)",
+            [float(planSummary.get("P20SignedMarginMm", float("nan")))],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "P80 Signed Margin (mm)",
+            [float(planSummary.get("P80SignedMarginMm", float("nan")))],
+        )
+
+    def populateMarginThresholdSummaryTable(
+        self,
+        tableNode: vtkMRMLTableNode | None,
+        thresholdSummaryRows: Sequence[dict[str, float | int | str]],
+    ) -> None:
+        if not tableNode:
+            raise ValueError("Margin threshold summary table node is required.")
+
+        tableNode.RemoveAllColumns()
+        self._addStringColumn(
+            tableNode,
+            "Margin Bucket",
+            [row.get("Bucket", "") for row in thresholdSummaryRows],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Count",
+            [int(row.get("Count", 0)) for row in thresholdSummaryRows],
+            integer=True,
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Percent (%)",
+            [float(row.get("Percent", 0.0)) for row in thresholdSummaryRows],
+        )
+
+    def populateStructureSafetySummaryTable(
+        self,
+        tableNode: vtkMRMLTableNode | None,
+        structureSafetyRows: Sequence[dict[str, float | int | str]],
+    ) -> None:
+        if not tableNode:
+            raise ValueError("Structure safety summary table node is required.")
+
+        tableNode.RemoveAllColumns()
+        self._addStringColumn(
+            tableNode,
+            "Structure Segment ID",
+            [row.get("StructureSegmentID", "") for row in structureSafetyRows],
+        )
+        self._addStringColumn(
+            tableNode,
+            "Structure Name",
+            [row.get("StructureName", "") for row in structureSafetyRows],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Minimum Distance (mm)",
+            [float(row.get("MinDistanceMm", float("nan"))) for row in structureSafetyRows],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Mean Distance (mm)",
+            [float(row.get("MeanDistanceMm", float("nan"))) for row in structureSafetyRows],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Median Distance (mm)",
+            [float(row.get("MedianDistanceMm", float("nan"))) for row in structureSafetyRows],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "P20 Distance (mm)",
+            [float(row.get("P20DistanceMm", float("nan"))) for row in structureSafetyRows],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "P80 Distance (mm)",
+            [float(row.get("P80DistanceMm", float("nan"))) for row in structureSafetyRows],
+        )
+
+    def populateStructureSafetyThresholdSummaryTable(
+        self,
+        tableNode: vtkMRMLTableNode | None,
+        thresholdSummaryRows: Sequence[dict[str, float | int | str]],
+    ) -> None:
+        if not tableNode:
+            raise ValueError("Structure safety threshold summary table node is required.")
+
+        tableNode.RemoveAllColumns()
+        self._addStringColumn(
+            tableNode,
+            "Structure Segment ID",
+            [row.get("StructureSegmentID", "") for row in thresholdSummaryRows],
+        )
+        self._addStringColumn(
+            tableNode,
+            "Structure Name",
+            [row.get("StructureName", "") for row in thresholdSummaryRows],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Count < 0 mm",
+            [int(row.get("CountBelow0Mm", 0)) for row in thresholdSummaryRows],
+            integer=True,
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Percent < 0 mm",
+            [float(row.get("PercentBelow0Mm", 0.0)) for row in thresholdSummaryRows],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Count < 2 mm",
+            [int(row.get("CountBelow2Mm", 0)) for row in thresholdSummaryRows],
+            integer=True,
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Percent < 2 mm",
+            [float(row.get("PercentBelow2Mm", 0.0)) for row in thresholdSummaryRows],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Count < 5 mm",
+            [int(row.get("CountBelow5Mm", 0)) for row in thresholdSummaryRows],
+            integer=True,
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Percent < 5 mm",
+            [float(row.get("PercentBelow5Mm", 0.0)) for row in thresholdSummaryRows],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Count >= 5 mm",
+            [int(row.get("CountAtLeast5Mm", 0)) for row in thresholdSummaryRows],
+            integer=True,
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Percent >= 5 mm",
+            [float(row.get("PercentAtLeast5Mm", 0.0)) for row in thresholdSummaryRows],
+        )
+
+    @staticmethod
+    def _addStringColumn(tableNode: vtkMRMLTableNode, columnName: str, values: Sequence[float | int | str]) -> None:
+        column = vtk.vtkStringArray()
+        column.SetName(columnName)
+        for value in values:
+            column.InsertNextValue("" if value is None else str(value))
+        tableNode.AddColumn(column)
+
+    @staticmethod
+    def _addNumericColumn(
+        tableNode: vtkMRMLTableNode,
+        columnName: str,
+        values: Sequence[float | int],
+        integer: bool = False,
+    ) -> None:
+        column = vtk.vtkIntArray() if integer else vtk.vtkDoubleArray()
+        column.SetName(columnName)
+        for value in values:
+            if integer:
+                column.InsertNextValue(int(value))
+            else:
+                column.InsertNextValue(float(value))
+        tableNode.AddColumn(column)
+
+    def getValidSegmentationSegments(
+        self,
+        segmentationNode: vtkMRMLSegmentationNode | None,
+        operationName: str,
+    ) -> list[dict[str, str]]:
+        if not segmentationNode:
+            raise ValueError(f"{operationName}: segmentation node is required.")
+
+        self._ensureSegmentationHasClosedSurface(segmentationNode)
+        segmentation = segmentationNode.GetSegmentation()
+        validSegments: list[dict[str, str]] = []
+        for segmentIndex in range(segmentation.GetNumberOfSegments()):
+            segmentID = segmentation.GetNthSegmentID(segmentIndex)
+            if not segmentID:
+                continue
+            closedSurface = vtk.vtkPolyData()
+            segmentationNode.GetClosedSurfaceRepresentation(segmentID, closedSurface)
+            if closedSurface.GetNumberOfPoints() <= 0:
+                logging.warning("%s: segment '%s' has no closed-surface points and will be skipped.", operationName, segmentID)
+                continue
+            segment = segmentation.GetSegment(segmentID)
+            segmentName = segment.GetName() if segment and segment.GetName() else segmentID
+            validSegments.append(
+                {
+                    "segmentID": segmentID,
+                    "segmentName": segmentName,
+                }
+            )
+
+        if len(validSegments) == 0:
+            raise RuntimeError(
+                f"{operationName}: segmentation '{segmentationNode.GetName()}' has no valid closed-surface segments."
+            )
+        return validSegments
+
+    def segmentationSegmentToModel(
         self,
         segmentationNode: vtkMRMLSegmentationNode,
+        segmentID: str,
         modelName: str,
         outputModelNode: vtkMRMLModelNode | None = None,
     ) -> vtkMRMLModelNode:
         self._ensureSegmentationHasClosedSurface(segmentationNode)
 
-        segmentID = self.getWorkingSegmentID(segmentationNode, f"model conversion for '{modelName}'")
+        segmentation = segmentationNode.GetSegmentation()
+        segment = segmentation.GetSegment(segmentID) if segmentation else None
+        if segment is None:
+            raise RuntimeError(
+                f"model conversion for '{modelName}': segment '{segmentID}' was not found in '{segmentationNode.GetName()}'."
+            )
+
         closedSurface = vtk.vtkPolyData()
         segmentationNode.GetClosedSurfaceRepresentation(segmentID, closedSurface)
         if closedSurface.GetNumberOfPoints() <= 0:
@@ -946,6 +1617,20 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         if modelDisplayNode:
             modelDisplayNode.SetVisibility(False)
         return modelNode
+
+    def segmentationFirstSegmentToModel(
+        self,
+        segmentationNode: vtkMRMLSegmentationNode,
+        modelName: str,
+        outputModelNode: vtkMRMLModelNode | None = None,
+    ) -> vtkMRMLModelNode:
+        segmentID = self.getWorkingSegmentID(segmentationNode, f"model conversion for '{modelName}'")
+        return self.segmentationSegmentToModel(
+            segmentationNode,
+            segmentID,
+            modelName,
+            outputModelNode=outputModelNode,
+        )
 
     def getModelFieldData(self, modelNode: vtkMRMLModelNode) -> vtk.vtkFieldData:
         mesh = modelNode.GetMesh()

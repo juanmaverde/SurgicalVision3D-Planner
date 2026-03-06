@@ -401,13 +401,47 @@
        </widget>
       </item>
       <item row="3" column="0">
+       <widget class="QLabel" name="riskStructuresSegmentationLabel">
+        <property name="text">
+         <string>Structures-at-risk segmentation:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="1">
+       <widget class="qMRMLNodeComboBox" name="riskStructuresSegmentationSelector">
+        <property name="toolTip">
+         <string>Optional segmentation containing one or more structures at risk for safety-distance evaluation.</string>
+        </property>
+        <property name="nodeTypes">
+         <stringlist notr="true">
+          <string>vtkMRMLSegmentationNode</string>
+         </stringlist>
+        </property>
+        <property name="noneEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="addEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="removeEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="renameEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="SlicerParameterName" stdset="0">
+         <string>riskStructuresSegmentation</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="0">
        <widget class="QLabel" name="recolorThresholdLowLabel">
         <property name="text">
          <string>Recolor threshold low (mm):</string>
         </property>
        </widget>
       </item>
-      <item row="3" column="1">
+      <item row="4" column="1">
        <widget class="ctkDoubleSpinBox" name="recolorThresholdLowSpinBox">
         <property name="minimum">
          <double>-100.000000000000000</double>
@@ -426,14 +460,14 @@
         </property>
        </widget>
       </item>
-      <item row="4" column="0">
+      <item row="5" column="0">
        <widget class="QLabel" name="recolorThresholdMidLabel">
         <property name="text">
          <string>Recolor threshold mid (mm):</string>
         </property>
        </widget>
       </item>
-      <item row="4" column="1">
+      <item row="5" column="1">
        <widget class="ctkDoubleSpinBox" name="recolorThresholdMidSpinBox">
         <property name="minimum">
          <double>-100.000000000000000</double>
@@ -452,14 +486,14 @@
         </property>
        </widget>
       </item>
-      <item row="5" column="0">
+      <item row="6" column="0">
        <widget class="QLabel" name="recolorThresholdHighLabel">
         <property name="text">
          <string>Recolor threshold high (mm):</string>
         </property>
        </widget>
       </item>
-      <item row="5" column="1">
+      <item row="6" column="1">
        <widget class="ctkDoubleSpinBox" name="recolorThresholdHighSpinBox">
         <property name="minimum">
          <double>-100.000000000000000</double>
@@ -478,7 +512,7 @@
         </property>
        </widget>
       </item>
-      <item row="6" column="0" colspan="2">
+      <item row="7" column="0" colspan="2">
        <layout class="QHBoxLayout" name="evaluationButtonsLayout">
         <item>
          <widget class="QPushButton" name="evaluateMarginsButton">

@@ -37,3 +37,24 @@
 - Placement assumes the source probe geometry is oriented along negative Z in local coordinates.
 - The rigid placement transform aligns source direction `[0, 0, -1]` to each endpoint-derived trajectory direction,
   then translates to the trajectory entry point.
+
+## Phase 1.1 hardening pass
+- Added deterministic generated-node lifecycle rules:
+  - generated probe/trajectory nodes are tracked and reconciled against scene state
+  - module-owned combined segmentation, margin model, and result table are reused deterministically
+  - stale module-owned outputs are cleared when upstream data changes
+- Hardened repeated-run behavior for:
+  - `Place Probes`
+  - `Create Trajectory Lines`
+  - `Merge Translated Probes`
+  - `Evaluate Margins`
+  - repeated recolor/reset cycles
+- Added stronger guard clauses and explicit user-facing errors for missing/invalid inputs.
+- Added centralized first-segment helper (`getWorkingSegmentID`) so first-segment policy is explicit and validated.
+- Added deterministic naming for generated outputs (`SV3D ...`).
+- Added temporary margin-input model cleanup so repeated margin evaluations do not leave orphan helper models.
+
+## Remaining for Phase 2
+- Optional explicit user segment selection UI beyond first-segment policy.
+- Live drag interaction updates for probe placement.
+- Higher-level planning analytics and richer margin reporting UI.

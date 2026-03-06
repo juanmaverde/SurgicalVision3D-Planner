@@ -32,9 +32,19 @@ from slicer.util import VTKObservationMixin
 REFERENCE_PROBE_DIRECTION_RAS = np.array([0.0, 0.0, -1.0], dtype=float)
 GENERATED_PROBE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedProbe"
 GENERATED_TRAJECTORY_LINE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedTrajectoryLine"
+GENERATED_COMBINED_PROBE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedCombinedProbe"
+GENERATED_MARGIN_MODEL_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedMarginModel"
+GENERATED_RESULT_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedResultTable"
+TEMP_PROBE_MARGIN_INPUT_ATTRIBUTE = "SurgicalVision3D_Planner.TempProbeMarginInput"
+TEMP_TUMOR_MARGIN_INPUT_ATTRIBUTE = "SurgicalVision3D_Planner.TempTumorMarginInput"
 SIGNED_DISTANCE_ARRAY_NAME = "Signed"
 SIGNED_DISTANCE_BACKUP_ARRAY_NAME = "SignedOriginal"
 DEFAULT_MARGIN_COLOR_NODE_ID = "vtkMRMLColorTableNode2"
+COMBINED_PROBE_NODE_NAME = "SV3D Combined Ablation Zone"
+MARGIN_MODEL_NODE_NAME = "SV3D Signed Margin Model"
+MARGIN_TABLE_NODE_NAME = "SV3D Signed Margin Table"
+TEMP_PROBE_MODEL_NODE_NAME = "SV3D Temp Probe Margin Input"
+TEMP_TUMOR_MODEL_NODE_NAME = "SV3D Temp Tumor Margin Input"
 
 
 def _normalize_vector(vector: Sequence[float]) -> np.ndarray:
@@ -248,6 +258,35 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self.addObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._updateButtonStates)
             self._updateButtonStates()
 
+    def _reconcileParameterNodeState(self) -> None:
+        if not self.logic or not self._parameterNode:
+            return
+
+        existingProbeNodeIDs = self.logic.resolveExistingNodeIDs(self.logic.deserializeNodeIDs(self._parameterNode.generatedProbeNodeIDs))
+        existingLineNodeIDs = self.logic.resolveExistingNodeIDs(self.logic.deserializeNodeIDs(self._parameterNode.generatedTrajectoryLineIDs))
+        serializedProbeNodeIDs = self.logic.serializeNodeIDs(existingProbeNodeIDs)
+        serializedLineNodeIDs = self.logic.serializeNodeIDs(existingLineNodeIDs)
+        if serializedProbeNodeIDs != self._parameterNode.generatedProbeNodeIDs:
+            self._parameterNode.generatedProbeNodeIDs = serializedProbeNodeIDs
+        if serializedLineNodeIDs != self._parameterNode.generatedTrajectoryLineIDs:
+            self._parameterNode.generatedTrajectoryLineIDs = serializedLineNodeIDs
+
+        for nodeFieldName in ("combinedProbeSegmentation", "outputMarginModel", "resultTable", "tumorTransform"):
+            node = getattr(self._parameterNode, nodeFieldName)
+            if node and not slicer.mrmlScene.IsNodePresent(node):
+                setattr(self._parameterNode, nodeFieldName, None)
+
+    def _clearOwnedDerivedOutputs(self, clearReferences: bool = False) -> None:
+        if not self.logic or not self._parameterNode:
+            return
+
+        if self.logic.removeNodeIfOwned(self._parameterNode.combinedProbeSegmentation, GENERATED_COMBINED_PROBE_ATTRIBUTE) or clearReferences:
+            self._parameterNode.combinedProbeSegmentation = None
+        if self.logic.removeNodeIfOwned(self._parameterNode.outputMarginModel, GENERATED_MARGIN_MODEL_ATTRIBUTE) or clearReferences:
+            self._parameterNode.outputMarginModel = None
+        if self.logic.removeNodeIfOwned(self._parameterNode.resultTable, GENERATED_RESULT_TABLE_ATTRIBUTE) or clearReferences:
+            self._parameterNode.resultTable = None
+
     def _updateButtonStates(self, caller=None, event=None) -> None:
         if not self._parameterNode:
             for buttonName in (
@@ -262,6 +301,8 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             ):
                 getattr(self.ui, buttonName).enabled = False
             return
+
+        self._reconcileParameterNodeState()
 
         hasProbeAndEndpoints = bool(self._parameterNode.referenceProbeSegmentation and self._parameterNode.endpointsMarkups)
         generatedProbeNodeIDs = self.logic.deserializeNodeIDs(self._parameterNode.generatedProbeNodeIDs) if self.logic else []
@@ -286,15 +327,39 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             if not self.logic or not self._parameterNode:
                 raise RuntimeError("Module logic is not initialized.")
 
+            if not self._parameterNode.referenceProbeSegmentation:
+                raise ValueError("Select a reference probe segmentation before placing probes.")
+            if not self._parameterNode.endpointsMarkups:
+                raise ValueError("Select an endpoint markups node before placing probes.")
+            controlPointCount = int(self._parameterNode.endpointsMarkups.GetNumberOfControlPoints())
+            if controlPointCount == 0:
+                raise ValueError("Endpoint markups node has no control points.")
+            if controlPointCount % 2 != 0:
+                raise ValueError(
+                    f"Endpoint markups has {controlPointCount} control points. Add one more point to complete entry/target pairs."
+                )
+
+            existingProbeNodeIDs = self.logic.resolveExistingNodeIDs(
+                self.logic.deserializeNodeIDs(self._parameterNode.generatedProbeNodeIDs)
+            )
             trajectories = self.logic.extractTrajectoriesFromMarkups(self._parameterNode.endpointsMarkups, strictEven=True)
             if self._parameterNode.clearPreviousGeneratedProbes:
-                self.logic.removeNodesByIDs(self.logic.deserializeNodeIDs(self._parameterNode.generatedProbeNodeIDs))
-                self.logic.removeNodesByIDs(self.logic.deserializeNodeIDs(self._parameterNode.generatedTrajectoryLineIDs))
+                self.logic.removeGeneratedProbeNodes()
+                self.logic.removeGeneratedTrajectoryLines()
+                self._clearOwnedDerivedOutputs(clearReferences=True)
                 self._parameterNode.generatedProbeNodeIDs = "[]"
                 self._parameterNode.generatedTrajectoryLineIDs = "[]"
+                existingProbeNodeIDs = []
 
             generatedProbeNodeIDs = self.logic.placeProbeInstances(self._parameterNode.referenceProbeSegmentation, trajectories)
-            self._parameterNode.generatedProbeNodeIDs = self.logic.serializeNodeIDs(generatedProbeNodeIDs)
+            if self._parameterNode.clearPreviousGeneratedProbes:
+                trackedProbeNodeIDs = generatedProbeNodeIDs
+            else:
+                trackedProbeNodeIDs = self.logic.mergeNodeIDLists(existingProbeNodeIDs, generatedProbeNodeIDs)
+            self._parameterNode.generatedProbeNodeIDs = self.logic.serializeNodeIDs(trackedProbeNodeIDs)
+
+            # Probe placement invalidates previously merged/evaluated module-owned outputs.
+            self._clearOwnedDerivedOutputs(clearReferences=True)
 
             if self._parameterNode.createTrajectoryLinesOnPlacement:
                 generatedLineNodeIDs = self.logic.createTrajectoryLines(trajectories, clearExisting=True)
@@ -306,6 +371,15 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         with slicer.util.tryWithErrorDisplay(_("Failed to create trajectory lines."), waitCursor=True):
             if not self.logic or not self._parameterNode:
                 raise RuntimeError("Module logic is not initialized.")
+            if not self._parameterNode.endpointsMarkups:
+                raise ValueError("Select an endpoint markups node before creating trajectory lines.")
+            controlPointCount = int(self._parameterNode.endpointsMarkups.GetNumberOfControlPoints())
+            if controlPointCount == 0:
+                raise ValueError("Endpoint markups node has no control points.")
+            if controlPointCount % 2 != 0:
+                raise ValueError(
+                    f"Endpoint markups has {controlPointCount} control points. Add one more point to complete entry/target pairs."
+                )
             trajectories = self.logic.extractTrajectoriesFromMarkups(self._parameterNode.endpointsMarkups, strictEven=True)
             generatedLineNodeIDs = self.logic.createTrajectoryLines(trajectories, clearExisting=True)
             self._parameterNode.generatedTrajectoryLineIDs = self.logic.serializeNodeIDs(generatedLineNodeIDs)
@@ -315,9 +389,19 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         with slicer.util.tryWithErrorDisplay(_("Failed to merge translated probes."), waitCursor=True):
             if not self.logic or not self._parameterNode:
                 raise RuntimeError("Module logic is not initialized.")
-            generatedProbeNodeIDs = self.logic.deserializeNodeIDs(self._parameterNode.generatedProbeNodeIDs)
+            generatedProbeNodeIDs = self.logic.resolveExistingNodeIDs(
+                self.logic.deserializeNodeIDs(self._parameterNode.generatedProbeNodeIDs)
+            )
+            if len(generatedProbeNodeIDs) == 0:
+                raise ValueError("No generated probe nodes are available. Click 'Place Probes' first.")
             combinedProbeNode = self.logic.mergeProbeInstances(generatedProbeNodeIDs, self._parameterNode.combinedProbeSegmentation)
             self._parameterNode.combinedProbeSegmentation = combinedProbeNode
+
+            # Merged ablation geometry changed, margin outputs are now stale.
+            self.logic.removeNodeIfOwned(self._parameterNode.outputMarginModel, GENERATED_MARGIN_MODEL_ATTRIBUTE)
+            self.logic.removeNodeIfOwned(self._parameterNode.resultTable, GENERATED_RESULT_TABLE_ATTRIBUTE)
+            self._parameterNode.outputMarginModel = None
+            self._parameterNode.resultTable = None
             self._updateButtonStates()
 
     def onRegisterTumorButton(self) -> None:
@@ -344,10 +428,16 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         with slicer.util.tryWithErrorDisplay(_("Failed to evaluate margins."), waitCursor=True):
             if not self.logic or not self._parameterNode:
                 raise RuntimeError("Module logic is not initialized.")
+            if not self._parameterNode.tumorSegmentation:
+                raise ValueError("Select a tumor segmentation before evaluating margins.")
 
             probeSegmentation = self._parameterNode.combinedProbeSegmentation
             if not probeSegmentation:
-                generatedProbeNodeIDs = self.logic.deserializeNodeIDs(self._parameterNode.generatedProbeNodeIDs)
+                generatedProbeNodeIDs = self.logic.resolveExistingNodeIDs(
+                    self.logic.deserializeNodeIDs(self._parameterNode.generatedProbeNodeIDs)
+                )
+                if len(generatedProbeNodeIDs) == 0:
+                    raise ValueError("No probe segmentation is available for margin evaluation. Place and merge probes first.")
                 probeSegmentation = self.logic.mergeProbeInstances(generatedProbeNodeIDs, self._parameterNode.combinedProbeSegmentation)
                 self._parameterNode.combinedProbeSegmentation = probeSegmentation
 
@@ -366,6 +456,8 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         with slicer.util.tryWithErrorDisplay(_("Failed to recolor margins."), waitCursor=True):
             if not self.logic or not self._parameterNode:
                 raise RuntimeError("Module logic is not initialized.")
+            if not self._parameterNode.outputMarginModel:
+                raise ValueError("No margin model is available. Evaluate margins first.")
             thresholds = (
                 self._parameterNode.recolorThresholdLow,
                 self._parameterNode.recolorThresholdMid,
@@ -378,6 +470,8 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         with slicer.util.tryWithErrorDisplay(_("Failed to reset margin colors."), waitCursor=True):
             if not self.logic or not self._parameterNode:
                 raise RuntimeError("Module logic is not initialized.")
+            if not self._parameterNode.outputMarginModel:
+                raise ValueError("No margin model is available. Evaluate margins first.")
             self.logic.resetMarginModelColors(self._parameterNode.outputMarginModel)
             self._updateButtonStates()
 
@@ -408,6 +502,26 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         except Exception:
             logging.warning("Failed to parse serialized node IDs: %s", serializedNodeIDs)
             return []
+
+    @staticmethod
+    def resolveExistingNodeIDs(nodeIDs: Sequence[str]) -> list[str]:
+        existingNodeIDs: list[str] = []
+        for nodeID in nodeIDs:
+            if slicer.mrmlScene.GetNodeByID(nodeID):
+                existingNodeIDs.append(nodeID)
+        return existingNodeIDs
+
+    @staticmethod
+    def mergeNodeIDLists(*nodeIDLists: Sequence[str]) -> list[str]:
+        mergedNodeIDs: list[str] = []
+        seenNodeIDs: set[str] = set()
+        for nodeIDList in nodeIDLists:
+            for nodeID in nodeIDList:
+                if not nodeID or nodeID in seenNodeIDs:
+                    continue
+                seenNodeIDs.add(nodeID)
+                mergedNodeIDs.append(nodeID)
+        return mergedNodeIDs
 
     @staticmethod
     def extractTrajectoriesFromPointPairs(
@@ -496,7 +610,7 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
 
         generatedLineNodeIDs: list[str] = []
         for trajectory in trajectories:
-            lineNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsLineNode", f"Trajectory_{trajectory.trajectoryIndex + 1:02d}")
+            lineNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsLineNode", f"SV3D Trajectory {trajectory.trajectoryIndex + 1:02d}")
             pointArray = np.array([trajectory.entryPointRAS, trajectory.targetPointRAS], dtype=float)
             slicer.util.updateMarkupsControlPointsFromArray(lineNode, pointArray)
             lineNode.SetAttribute(GENERATED_TRAJECTORY_LINE_ATTRIBUTE, "1")
@@ -510,16 +624,53 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             generatedLineNodeIDs.append(lineNode.GetID())
         return generatedLineNodeIDs
 
+    def removeNodesByAttribute(self, className: str, attributeName: str, attributeValue: str = "1", keepNodeID: str | None = None) -> None:
+        for node in slicer.util.getNodesByClass(className):
+            if keepNodeID and node.GetID() == keepNodeID:
+                continue
+            if node.GetAttribute(attributeName) == attributeValue:
+                slicer.mrmlScene.RemoveNode(node)
+
+    def removeGeneratedProbeNodes(self, keepNodeID: str | None = None) -> None:
+        self.removeNodesByAttribute("vtkMRMLSegmentationNode", GENERATED_PROBE_ATTRIBUTE, keepNodeID=keepNodeID)
+
     def removeGeneratedTrajectoryLines(self) -> None:
-        for lineNode in slicer.util.getNodesByClass("vtkMRMLMarkupsLineNode"):
-            if lineNode.GetAttribute(GENERATED_TRAJECTORY_LINE_ATTRIBUTE) == "1":
-                slicer.mrmlScene.RemoveNode(lineNode)
+        self.removeNodesByAttribute("vtkMRMLMarkupsLineNode", GENERATED_TRAJECTORY_LINE_ATTRIBUTE)
 
     def removeNodesByIDs(self, nodeIDs: Sequence[str]) -> None:
         for nodeID in nodeIDs:
             node = slicer.mrmlScene.GetNodeByID(nodeID)
             if node:
                 slicer.mrmlScene.RemoveNode(node)
+
+    def removeNodeIfOwned(self, node: vtk.vtkObject | None, ownershipAttribute: str, ownershipValue: str = "1") -> bool:
+        if not node:
+            return False
+        if not slicer.mrmlScene.IsNodePresent(node):
+            return False
+        if node.GetAttribute(ownershipAttribute) != ownershipValue:
+            return False
+        slicer.mrmlScene.RemoveNode(node)
+        return True
+
+    def createOrReuseOwnedOutputNode(
+        self,
+        className: str,
+        preferredName: str,
+        ownershipAttribute: str,
+        existingNode: vtk.vtkObject | None = None,
+    ):
+        outputNode = existingNode if existingNode and slicer.mrmlScene.IsNodePresent(existingNode) else None
+        if outputNode and outputNode.GetAttribute(ownershipAttribute) != "1":
+            outputNode = None
+
+        if outputNode is None:
+            outputNode = slicer.mrmlScene.AddNewNodeByClass(className, preferredName)
+
+        outputNode.SetName(preferredName)
+        outputNode.SetAttribute(ownershipAttribute, "1")
+        self.removeNodesByAttribute(className, ownershipAttribute, keepNodeID=outputNode.GetID())
+        return outputNode
 
     def mergeProbeInstances(
         self,
@@ -535,16 +686,22 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         if len(validProbeNodes) == 0:
             raise ValueError("No translated probe segmentations were found to merge.")
 
-        combinedSegmentation = outputSegmentation
-        if not combinedSegmentation or not slicer.mrmlScene.IsNodePresent(combinedSegmentation):
-            combinedSegmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "CombinedAblationZone")
+        combinedSegmentation = self.createOrReuseOwnedOutputNode(
+            "vtkMRMLSegmentationNode",
+            COMBINED_PROBE_NODE_NAME,
+            GENERATED_COMBINED_PROBE_ATTRIBUTE,
+            outputSegmentation,
+        )
 
         combinedSegmentation.CreateDefaultDisplayNodes()
         self._clearSegmentationSegments(combinedSegmentation)
 
         for nodeIndex, translatedProbeNode in enumerate(validProbeNodes):
             self._ensureSegmentationHasClosedSurface(translatedProbeNode)
-            sourceSegmentID = translatedProbeNode.GetSegmentation().GetNthSegmentID(0)
+            sourceSegmentID = self.getWorkingSegmentID(
+                translatedProbeNode,
+                "probe merge input",
+            )
             closedSurface = vtk.vtkPolyData()
             translatedProbeNode.GetClosedSurfaceRepresentation(sourceSegmentID, closedSurface)
             if closedSurface.GetNumberOfPoints() <= 0:
@@ -565,7 +722,10 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             self._mergeSegmentsByAppendingSurfaces(combinedSegmentation)
 
         combinedSegmentation.GetSegmentation().CreateRepresentation("Closed surface")
-        combinedSegmentation.SetName("CombinedAblationZone")
+        if combinedSegmentation.GetSegmentation().GetNumberOfSegments() != 1:
+            raise RuntimeError("Probe merge did not produce a single deterministic combined segment.")
+
+        combinedSegmentation.SetName(COMBINED_PROBE_NODE_NAME)
         displayNode = combinedSegmentation.GetDisplayNode()
         if displayNode:
             displayNode.SetOpacity(0.35)
@@ -623,35 +783,64 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         if not hasattr(slicer.modules, "modeltomodeldistance"):
             raise RuntimeError("ModelToModelDistance module is not available.")
 
-        probeModel = self.segmentationFirstSegmentToModel(probeSegmentation, "ProbeMarginInputModel")
-        tumorModel = self.segmentationFirstSegmentToModel(tumorSegmentation, "TumorMarginInputModel")
+        tempProbeModel = self.createOrReuseOwnedOutputNode(
+            "vtkMRMLModelNode",
+            TEMP_PROBE_MODEL_NODE_NAME,
+            TEMP_PROBE_MARGIN_INPUT_ATTRIBUTE,
+        )
+        tempTumorModel = self.createOrReuseOwnedOutputNode(
+            "vtkMRMLModelNode",
+            TEMP_TUMOR_MODEL_NODE_NAME,
+            TEMP_TUMOR_MARGIN_INPUT_ATTRIBUTE,
+        )
 
-        marginModel = outputMarginModel
-        if not marginModel or not slicer.mrmlScene.IsNodePresent(marginModel):
-            marginModel = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "SignedMarginModel")
+        probeModel = self.segmentationFirstSegmentToModel(
+            probeSegmentation,
+            TEMP_PROBE_MODEL_NODE_NAME,
+            outputModelNode=tempProbeModel,
+        )
+        tumorModel = self.segmentationFirstSegmentToModel(
+            tumorSegmentation,
+            TEMP_TUMOR_MODEL_NODE_NAME,
+            outputModelNode=tempTumorModel,
+        )
+
+        marginModel = self.createOrReuseOwnedOutputNode(
+            "vtkMRMLModelNode",
+            MARGIN_MODEL_NODE_NAME,
+            GENERATED_MARGIN_MODEL_ATTRIBUTE,
+            outputMarginModel,
+        )
         marginModel.CreateDefaultDisplayNodes()
 
-        distanceParameters = {
-            "vtkFile1": tumorModel.GetID(),
-            "vtkFile2": probeModel.GetID(),
-            "distanceType": "signed_closest_point",
-            "vtkOutput": marginModel.GetID(),
-        }
-        cliNode = slicer.cli.runSync(slicer.modules.modeltomodeldistance, None, distanceParameters)
-        if cliNode:
-            slicer.mrmlScene.RemoveNode(cliNode)
+        try:
+            distanceParameters = {
+                "vtkFile1": tumorModel.GetID(),
+                "vtkFile2": probeModel.GetID(),
+                "distanceType": "signed_closest_point",
+                "vtkOutput": marginModel.GetID(),
+            }
+            cliNode = slicer.cli.runSync(slicer.modules.modeltomodeldistance, None, distanceParameters)
+            if cliNode:
+                slicer.mrmlScene.RemoveNode(cliNode)
 
-        signedDistanceArray = self.getSignedDistanceArray(marginModel)
-        self.backupSignedDistanceArray(marginModel, signedDistanceArray)
-        self.configureMarginDisplayNode(marginModel, autoRange=True)
+            signedDistanceArray = self.getSignedDistanceArray(marginModel)
+            self.backupSignedDistanceArray(marginModel, signedDistanceArray)
+            self.configureMarginDisplayNode(marginModel, autoRange=True)
 
-        resultTable = outputTableNode
-        if not resultTable or not slicer.mrmlScene.IsNodePresent(resultTable):
-            resultTable = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTableNode", "MarginSignedDistanceTable")
-        self.populateResultTableFromMarginModel(marginModel, resultTable)
+            resultTable = self.createOrReuseOwnedOutputNode(
+                "vtkMRMLTableNode",
+                MARGIN_TABLE_NODE_NAME,
+                GENERATED_RESULT_TABLE_ATTRIBUTE,
+                outputTableNode,
+            )
+            self.populateResultTableFromMarginModel(marginModel, resultTable)
 
-        summary = self.signedDistanceSummary(signedDistanceArray)
-        return marginModel, resultTable, summary
+            summary = self.signedDistanceSummary(signedDistanceArray)
+            return marginModel, resultTable, summary
+        finally:
+            self.removeNodeIfOwned(tempProbeModel, TEMP_PROBE_MARGIN_INPUT_ATTRIBUTE)
+            self.removeNodeIfOwned(tempTumorModel, TEMP_TUMOR_MARGIN_INPUT_ATTRIBUTE)
 
     def recolorMarginModel(self, marginModelNode: vtkMRMLModelNode | None, thresholds: Sequence[float]) -> None:
         if not marginModelNode:
@@ -738,7 +927,7 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
     ) -> vtkMRMLModelNode:
         self._ensureSegmentationHasClosedSurface(segmentationNode)
 
-        segmentID = segmentationNode.GetSegmentation().GetNthSegmentID(0)
+        segmentID = self.getWorkingSegmentID(segmentationNode, f"model conversion for '{modelName}'")
         closedSurface = vtk.vtkPolyData()
         segmentationNode.GetClosedSurfaceRepresentation(segmentID, closedSurface)
         if closedSurface.GetNumberOfPoints() <= 0:
@@ -832,6 +1021,23 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             displayNode.Modified()
         node.Modified()
 
+    def getWorkingSegmentID(self, segmentationNode: vtkMRMLSegmentationNode | None, operationName: str) -> str:
+        if not segmentationNode:
+            raise ValueError(f"{operationName}: segmentation node is required.")
+        segmentation = segmentationNode.GetSegmentation()
+        if segmentation.GetNumberOfSegments() <= 0:
+            raise RuntimeError(
+                f"{operationName}: segmentation '{segmentationNode.GetName()}' has no segments."
+            )
+
+        # Phase 1 uses first-segment policy for probe/tumor workflow.
+        segmentID = segmentation.GetNthSegmentID(0)
+        if not segmentID:
+            raise RuntimeError(
+                f"{operationName}: failed to resolve the first segment in '{segmentationNode.GetName()}'."
+            )
+        return segmentID
+
     def _ensureSegmentationHasClosedSurface(self, segmentationNode: vtkMRMLSegmentationNode | None) -> None:
         if not segmentationNode:
             raise ValueError("Segmentation node is required.")
@@ -841,7 +1047,7 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         segmentation.CreateRepresentation("Closed surface")
 
     def _cloneReferenceProbe(self, referenceProbeSegmentation: vtkMRMLSegmentationNode, trajectoryIndex: int) -> vtkMRMLSegmentationNode:
-        sourceSegmentID = referenceProbeSegmentation.GetSegmentation().GetNthSegmentID(0)
+        sourceSegmentID = self.getWorkingSegmentID(referenceProbeSegmentation, "reference probe placement")
         sourceSurface = vtk.vtkPolyData()
         referenceProbeSegmentation.GetClosedSurfaceRepresentation(sourceSegmentID, sourceSurface)
         if sourceSurface.GetNumberOfPoints() <= 0:
@@ -849,7 +1055,7 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
 
         clonedProbeNode = slicer.mrmlScene.AddNewNodeByClass(
             "vtkMRMLSegmentationNode",
-            f"{referenceProbeSegmentation.GetName()}_translated_{trajectoryIndex + 1:02d}",
+            f"SV3D Placed Probe {trajectoryIndex + 1:02d}",
         )
         clonedProbeNode.CreateDefaultDisplayNodes()
         clonedProbeNode.AddSegmentFromClosedSurfaceRepresentation(sourceSurface, f"Probe_{trajectoryIndex + 1:02d}", [0.2, 0.9, 0.3])
@@ -929,6 +1135,8 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         cleanFilter = vtk.vtkCleanPolyData()
         cleanFilter.SetInputConnection(appendFilter.GetOutputPort())
         cleanFilter.Update()
+        if cleanFilter.GetOutput().GetNumberOfPoints() <= 0:
+            raise RuntimeError("Probe merge fallback produced an empty closed surface.")
 
         self._clearSegmentationSegments(segmentationNode)
         segmentationNode.AddSegmentFromClosedSurfaceRepresentation(cleanFilter.GetOutput(), "CombinedAblationZone", [1.0, 0.3, 0.1])

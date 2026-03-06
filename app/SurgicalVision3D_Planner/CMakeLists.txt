@@ -12,6 +12,10 @@ set(MODULE_PYTHON_RESOURCES
   Resources/Cohorts/cohort_schema_v1.json
   Resources/Cohorts/cohort_catalog_v1.json
   Resources/Cohorts/studies/example_cohort_v1.json
+  Resources/Reproducibility/reproducibility_package_schema_v1.json
+  Resources/Reproducibility/reproducibility_package_layout_v1.json
+  Resources/Reproducibility/example_reviewer_package_config_v1.json
+  Resources/Reproducibility/README_package_template.md
   )
 
 #-----------------------------------------------------------------------------

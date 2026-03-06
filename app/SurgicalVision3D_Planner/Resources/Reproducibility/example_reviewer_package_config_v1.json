@@ -1,0 +1,13 @@
+{
+  "packageMode": "ReviewerSupplement",
+  "includeBenchmarkArtifacts": true,
+  "includeScenarioRegistry": true,
+  "includeCohortStudyArtifacts": true,
+  "includeStudyAnalytics": true,
+  "includeReports": true,
+  "includeCanonicalJson": true,
+  "includeValidationResults": true,
+  "packageBaseName": "SV3D_ReproducibilityPackage",
+  "outputDirectory": "",
+  "notes": "Example Phase 12B reproducibility package config. Leave outputDirectory empty to use Slicer temporary path."
+}

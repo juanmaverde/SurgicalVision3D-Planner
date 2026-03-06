@@ -1,0 +1,35 @@
+{
+  "schemaName": "SV3DReproducibilityPackageSchema",
+  "schemaVersion": "v1",
+  "description": "Schema reference for deterministic SurgicalVision3D Planner reproducibility packages.",
+  "topLevelFiles": [
+    "manifest.json",
+    "README_package.md"
+  ],
+  "requiredFolders": [
+    "schemas",
+    "benchmarks",
+    "validation",
+    "cohorts",
+    "study_analytics",
+    "reports",
+    "exports",
+    "canonical_json"
+  ],
+  "manifestFields": [
+    "packageId",
+    "packageTimestampISO",
+    "packageSequence",
+    "packageMode",
+    "packageBaseName",
+    "createdByModule",
+    "schemaVersions",
+    "includedArtifacts",
+    "benchmarkCaseIds",
+    "studyIds",
+    "scenarioIds",
+    "reportIds",
+    "warnings",
+    "notes"
+  ]
+}

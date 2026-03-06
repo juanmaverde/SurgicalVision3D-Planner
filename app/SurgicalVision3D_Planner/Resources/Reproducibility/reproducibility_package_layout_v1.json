@@ -1,0 +1,39 @@
+{
+  "layoutName": "SV3DReproducibilityPackageLayout",
+  "layoutVersion": "v1",
+  "rootPattern": "<packageBaseName>_<sequence4>",
+  "folders": [
+    {
+      "name": "schemas",
+      "description": "Reproducibility package schema and layout references"
+    },
+    {
+      "name": "benchmarks",
+      "description": "Benchmark definitions and benchmark resource files"
+    },
+    {
+      "name": "validation",
+      "description": "Validation and benchmark run result tables"
+    },
+    {
+      "name": "cohorts",
+      "description": "Cohort definitions and cohort summary outputs"
+    },
+    {
+      "name": "study_analytics",
+      "description": "Study analytics and publication-oriented aggregate tables"
+    },
+    {
+      "name": "reports",
+      "description": "Human-facing report oriented artifacts and copied templates"
+    },
+    {
+      "name": "exports",
+      "description": "Copied export bundle artifacts and provenance tables"
+    },
+    {
+      "name": "canonical_json",
+      "description": "Canonical machine-readable JSON summaries"
+    }
+  ]
+}

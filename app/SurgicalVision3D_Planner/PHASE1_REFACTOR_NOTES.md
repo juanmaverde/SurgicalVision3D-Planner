@@ -218,3 +218,33 @@
   - the module does not yet auto-replay full planning/evaluation from raw imaging assets per case.
 - Cohort comparisons are descriptive aggregates (mean/median/min/max), not inferential statistics.
 - Report-layer integration remains lightweight via shared table export paths.
+
+## Phase 12B reproducibility and reviewer package
+- Added a deterministic reproducibility package layer with explicit package config and manifest models:
+  - `ReproducibilityPackageConfig`
+  - `ReproducibilityArtifactEntry`
+  - `ReproducibilityManifest`
+- Added package assembly helpers with conservative behavior:
+  - deterministic package path generation (`<base>_<sequence>`)
+  - artifact collection across schemas, benchmarks, validation, cohorts, study analytics, reports, exports, canonical JSON
+  - copy-existing-first strategy with lightweight JSON/CSV regeneration where needed
+  - optional missing artifacts recorded as manifest warnings rather than silent failure
+  - lightweight integrity metadata (always file size, optional cheap SHA256 for small files)
+- Added deterministic module-owned preview outputs:
+  - `SV3D Reproducibility Package Summary`
+  - `SV3D Reproducibility Manifest Preview`
+  - `SV3D Reproducibility Artifact Index`
+- Added minimal UI controls in a new **Reproducibility Package** section:
+  - package mode, include toggles, package base name, output directory, generate button, status label
+- Added reproducibility resources:
+  - `Resources/Reproducibility/reproducibility_package_schema_v1.json`
+  - `Resources/Reproducibility/reproducibility_package_layout_v1.json`
+  - `Resources/Reproducibility/example_reviewer_package_config_v1.json`
+  - `Resources/Reproducibility/README_package_template.md`
+- Added export integration:
+  - reproducibility preview tables are eligible for inclusion in structured export bundles when present.
+
+## Current Phase 12B limitations
+- Package assembly does not implement cryptographic signing or archival encryption in this phase.
+- Optional artifact discovery is table/resource driven; missing runtime outputs are reported as warnings.
+- Report and study-analytics artifacts are included only when corresponding outputs already exist in-scene.

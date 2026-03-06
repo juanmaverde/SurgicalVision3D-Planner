@@ -1,13 +1,15 @@
 ﻿from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import logging
 import math
+import shutil
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Annotated, Any, Sequence
 
 import numpy as np
 import vtk
@@ -28,7 +30,7 @@ from slicer.ScriptedLoadableModule import (
     ScriptedLoadableModuleTest,
     ScriptedLoadableModuleWidget,
 )
-from slicer.parameterNodeWrapper import parameterNodeWrapper
+from slicer.parameterNodeWrapper import Choice, parameterNodeWrapper
 from slicer.util import VTKObservationMixin
 
 
@@ -53,6 +55,9 @@ GENERATED_COHORT_EXECUTION_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.G
 GENERATED_COHORT_CASE_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedCohortCaseSummaryTable"
 GENERATED_COHORT_AGGREGATE_METRICS_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedCohortAggregateMetricsTable"
 GENERATED_COHORT_COMPARISON_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedCohortComparisonSummaryTable"
+GENERATED_REPRODUCIBILITY_PACKAGE_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedReproducibilityPackageSummaryTable"
+GENERATED_REPRODUCIBILITY_MANIFEST_PREVIEW_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedReproducibilityManifestPreviewTable"
+GENERATED_REPRODUCIBILITY_ARTIFACT_INDEX_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedReproducibilityArtifactIndexTable"
 TEMP_PROBE_MARGIN_INPUT_ATTRIBUTE = "SurgicalVision3D_Planner.TempProbeMarginInput"
 TEMP_TUMOR_MARGIN_INPUT_ATTRIBUTE = "SurgicalVision3D_Planner.TempTumorMarginInput"
 TEMP_PROBE_SAFETY_INPUT_ATTRIBUTE = "SurgicalVision3D_Planner.TempProbeSafetyInput"
@@ -81,6 +86,9 @@ COHORT_EXECUTION_SUMMARY_TABLE_NODE_NAME = "SV3D Cohort Execution Summary"
 COHORT_CASE_SUMMARY_TABLE_NODE_NAME = "SV3D Cohort Case Summary"
 COHORT_AGGREGATE_METRICS_TABLE_NODE_NAME = "SV3D Cohort Aggregate Metrics"
 COHORT_COMPARISON_SUMMARY_TABLE_NODE_NAME = "SV3D Cohort Comparison Summary"
+REPRODUCIBILITY_PACKAGE_SUMMARY_TABLE_NODE_NAME = "SV3D Reproducibility Package Summary"
+REPRODUCIBILITY_MANIFEST_PREVIEW_TABLE_NODE_NAME = "SV3D Reproducibility Manifest Preview"
+REPRODUCIBILITY_ARTIFACT_INDEX_TABLE_NODE_NAME = "SV3D Reproducibility Artifact Index"
 TEMP_PROBE_SAFETY_MODEL_NODE_NAME = "SV3D Temp Probe Safety Input"
 TEMP_STRUCTURE_SAFETY_MODEL_NODE_NAME = "SV3D Temp Structure Safety Input"
 TEMP_STRUCTURE_SAFETY_DISTANCE_MODEL_NODE_NAME = "SV3D Temp Structure Safety Distance"
@@ -248,6 +256,51 @@ class CohortCaseResult:
     metricValues: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class ReproducibilityPackageConfig:
+    packageMode: str = "ReviewerSupplement"
+    includeBenchmarkArtifacts: bool = True
+    includeScenarioRegistry: bool = True
+    includeCohortStudyArtifacts: bool = True
+    includeStudyAnalytics: bool = True
+    includeReports: bool = True
+    includeCanonicalJson: bool = True
+    includeValidationResults: bool = True
+    packageBaseName: str = "SV3D_ReproducibilityPackage"
+    outputDirectory: str = ""
+    lastPackageSequence: int = 0
+
+
+@dataclass
+class ReproducibilityArtifactEntry:
+    artifactKey: str
+    category: str
+    relativePath: str
+    status: str
+    sourcePath: str = ""
+    sizeBytes: int = 0
+    sha256: str = ""
+    warning: str = ""
+
+
+@dataclass
+class ReproducibilityManifest:
+    packageId: str
+    packageTimestampISO: str
+    packageSequence: int
+    packageMode: str
+    packageBaseName: str
+    createdByModule: str
+    schemaVersions: dict[str, str]
+    includedArtifacts: list[dict[str, Any]]
+    benchmarkCaseIds: list[str]
+    studyIds: list[str]
+    scenarioIds: list[str]
+    reportIds: list[str]
+    warnings: list[str]
+    notes: str = ""
+
+
 #
 # SurgicalVision3D_Planner
 #
@@ -308,6 +361,9 @@ class SurgicalVision3D_PlannerParameterNode:
     cohortCaseSummaryTable: vtkMRMLTableNode | None = None
     cohortAggregateMetricsTable: vtkMRMLTableNode | None = None
     cohortComparisonSummaryTable: vtkMRMLTableNode | None = None
+    reproducibilityPackageSummaryTable: vtkMRMLTableNode | None = None
+    reproducibilityManifestPreviewTable: vtkMRMLTableNode | None = None
+    reproducibilityArtifactIndexTable: vtkMRMLTableNode | None = None
 
     createTrajectoryLinesOnPlacement: bool = True
     clearPreviousGeneratedProbes: bool = True
@@ -327,7 +383,7 @@ class SurgicalVision3D_PlannerParameterNode:
     enableTargetSpacingRule: bool = True
     enableAngleRule: bool = False
     enableOverlapRule: bool = False
-    exportMode: str = "CurrentWorkingPlan"
+    exportMode: Annotated[str, Choice(["CurrentWorkingPlan", "SelectedScenario", "CurrentRecommendationContext"])] = "CurrentWorkingPlan"
     selectedExportScenarioID: str = ""
     exportBaseName: str = "SV3D_Export"
     lastExportDirectory: str = ""
@@ -342,7 +398,7 @@ class SurgicalVision3D_PlannerParameterNode:
     includeFeasibilityTables: bool = True
     includeCoordinationTables: bool = True
     cohortStudyDefinitionPath: str = "Resources/Cohorts/studies/example_cohort_v1.json"
-    cohortExecutionMode: str = "ScenarioRegistry"
+    cohortExecutionMode: Annotated[str, Choice(["ScenarioRegistry", "CurrentWorkingPlan"])] = "ScenarioRegistry"
     cohortIncludeMarginMetrics: bool = True
     cohortIncludeSafetyMetrics: bool = True
     cohortIncludeCoverageMetrics: bool = True
@@ -351,6 +407,17 @@ class SurgicalVision3D_PlannerParameterNode:
     cohortIncludeVerificationMetrics: bool = True
     cohortIncludeRecommendationMetrics: bool = True
     cohortMaxCases: int = 0
+    packageMode: Annotated[str, Choice(["ReviewerSupplement", "ValidationArchive", "InternalHandoff"])] = "ReviewerSupplement"
+    includeBenchmarkArtifacts: bool = True
+    includeScenarioRegistry: bool = True
+    includeCohortStudyArtifacts: bool = True
+    includeStudyAnalytics: bool = True
+    includeReports: bool = True
+    includeCanonicalJson: bool = True
+    includeValidationResults: bool = True
+    packageBaseName: str = "SV3D_ReproducibilityPackage"
+    packageOutputDirectory: str = ""
+    lastReproducibilityPackageSequence: int = 0
 
     generatedProbeNodeIDs: str = "[]"
     generatedTrajectoryLineIDs: str = "[]"
@@ -413,6 +480,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         self.ui.resetMarginColorsButton.connect("clicked(bool)", self.onResetMarginColorsButton)
         self.ui.evaluateProbeCoordinationButton.connect("clicked(bool)", self.onEvaluateProbeCoordinationButton)
         self.ui.runCohortEvaluationButton.connect("clicked(bool)", self.onRunCohortEvaluationButton)
+        self.ui.generateReproducibilityPackageButton.connect("clicked(bool)", self.onGenerateReproducibilityPackageButton)
         self.ui.exportBundleButton.connect("clicked(bool)", self.onExportBundleButton)
         self.ui.riskStructuresSegmentationSelector.connect(
             "currentNodeChanged(vtkMRMLNode*)",
@@ -428,6 +496,12 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self.ui.selectedExportScenarioIDLineEdit.connect("textChanged(QString)", self._updateButtonStates)
         if hasattr(self.ui, "exportBaseNameLineEdit"):
             self.ui.exportBaseNameLineEdit.connect("textChanged(QString)", self._updateButtonStates)
+        if hasattr(self.ui, "packageModeComboBox"):
+            self.ui.packageModeComboBox.connect("currentIndexChanged(int)", self._updateButtonStates)
+        if hasattr(self.ui, "packageBaseNameLineEdit"):
+            self.ui.packageBaseNameLineEdit.connect("textChanged(QString)", self._updateButtonStates)
+        if hasattr(self.ui, "packageOutputDirectoryLineEdit"):
+            self.ui.packageOutputDirectoryLineEdit.connect("textChanged(QString)", self._updateButtonStates)
 
         self.initializeParameterNode()
 
@@ -488,6 +562,19 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             "cohortIncludeRecommendationMetricsCheckBox": "Include recommendation/composite-score context in cohort outputs.",
             "cohortMaxCasesSpinBox": "Maximum number of cohort cases to execute (0 runs all listed cases).",
             "runCohortEvaluationButton": "Run deterministic cohort batch evaluation and update cohort summary tables.",
+            # Reproducibility package
+            "packageModeComboBox": "Package scope preset. ReviewerSupplement is the default frozen bundle profile.",
+            "includeBenchmarkArtifactsCheckBox": "Include benchmark definitions/catalog files and benchmark runtime outputs when available.",
+            "includeScenarioRegistryCheckBox": "Include scenario registry and recommendation provenance exports when available.",
+            "includeCohortStudyArtifactsCheckBox": "Include cohort definitions and cohort summary tables when present.",
+            "includeStudyAnalyticsCheckBox": "Include study-analytics tables if generated in the current scene.",
+            "includeReportsCheckBox": "Include report-oriented tables/JSON artifacts when available.",
+            "includeCanonicalJsonCheckBox": "Include canonical JSON summaries and schema resources for interop/review.",
+            "includeValidationResultsCheckBox": "Include validation and benchmark result tables when present.",
+            "packageBaseNameLineEdit": "Base name for reproducibility package folder. Sequence suffix is added automatically.",
+            "packageOutputDirectoryLineEdit": "Destination directory for reproducibility packages. Empty uses the Slicer temp folder.",
+            "generateReproducibilityPackageButton": "Assemble deterministic reviewer/reproducibility package without mutating plan state.",
+            "reproducibilityStatusLabel": "Status of the last reproducibility package run.",
             # Export
             "exportModeComboBox": "Choose export scope: current plan, selected scenario, or recommendation context.",
             "selectedExportScenarioIDLineEdit": "Scenario ID used when export mode is SelectedScenario.",
@@ -547,6 +634,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self.addObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._updateButtonStates)
             self._syncExportWidgetsFromParameterNode()
             self._syncCohortWidgetsFromParameterNode()
+            self._syncReproducibilityWidgetsFromParameterNode()
             self._updateButtonStates()
 
     def _syncExportWidgetsFromParameterNode(self) -> None:
@@ -576,6 +664,20 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             modeIndex = self.ui.cohortExecutionModeComboBox.findText(currentModeText)
             if modeIndex >= 0:
                 self.ui.cohortExecutionModeComboBox.currentIndex = modeIndex
+
+    def _syncReproducibilityWidgetsFromParameterNode(self) -> None:
+        if not self._parameterNode:
+            return
+
+        if hasattr(self.ui, "packageModeComboBox"):
+            currentModeText = str(self._parameterNode.packageMode or "ReviewerSupplement")
+            modeIndex = self.ui.packageModeComboBox.findText(currentModeText)
+            if modeIndex >= 0:
+                self.ui.packageModeComboBox.currentIndex = modeIndex
+        if hasattr(self.ui, "packageBaseNameLineEdit"):
+            self.ui.packageBaseNameLineEdit.text = str(self._parameterNode.packageBaseName or "")
+        if hasattr(self.ui, "packageOutputDirectoryLineEdit"):
+            self.ui.packageOutputDirectoryLineEdit.text = str(self._parameterNode.packageOutputDirectory or "")
 
     def _reconcileParameterNodeState(self) -> None:
         if not self.logic or not self._parameterNode:
@@ -611,6 +713,9 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             "cohortCaseSummaryTable",
             "cohortAggregateMetricsTable",
             "cohortComparisonSummaryTable",
+            "reproducibilityPackageSummaryTable",
+            "reproducibilityManifestPreviewTable",
+            "reproducibilityArtifactIndexTable",
         ):
             node = getattr(self._parameterNode, nodeFieldName)
             if node and not slicer.mrmlScene.IsNodePresent(node):
@@ -741,9 +846,11 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 "resetMarginColorsButton",
                 "evaluateProbeCoordinationButton",
                 "runCohortEvaluationButton",
+                "generateReproducibilityPackageButton",
                 "exportBundleButton",
             ):
-                getattr(self.ui, buttonName).enabled = False
+                if hasattr(self.ui, buttonName):
+                    getattr(self.ui, buttonName).enabled = False
             return
 
         self._reconcileParameterNodeState()
@@ -785,8 +892,15 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             if hasattr(self.ui, "cohortStudyDefinitionPathLineEdit")
             else str(self._parameterNode.cohortStudyDefinitionPath)
         )
+        packageBaseName = (
+            str(self.ui.packageBaseNameLineEdit.text)
+            if hasattr(self.ui, "packageBaseNameLineEdit")
+            else str(self._parameterNode.packageBaseName)
+        )
         self.ui.exportBundleButton.enabled = bool(exportBaseName.strip()) and (not scenarioRequired or bool(selectedScenarioID.strip()))
         self.ui.runCohortEvaluationButton.enabled = bool(cohortStudyDefinitionPath.strip())
+        if hasattr(self.ui, "generateReproducibilityPackageButton"):
+            self.ui.generateReproducibilityPackageButton.enabled = bool(packageBaseName.strip())
 
     def onPlaceProbesButton(self) -> None:
         with slicer.util.tryWithErrorDisplay(_("Failed to place probes."), waitCursor=True):
@@ -1236,6 +1350,108 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 )
             self._updateButtonStates()
 
+    def _buildReproducibilityPackageConfig(self) -> ReproducibilityPackageConfig:
+        if not self._parameterNode:
+            return ReproducibilityPackageConfig()
+
+        packageMode = (
+            str(self.ui.packageModeComboBox.currentText)
+            if hasattr(self.ui, "packageModeComboBox")
+            else str(self._parameterNode.packageMode)
+        )
+        packageBaseName = (
+            str(self.ui.packageBaseNameLineEdit.text)
+            if hasattr(self.ui, "packageBaseNameLineEdit")
+            else str(self._parameterNode.packageBaseName)
+        )
+        packageOutputDirectory = (
+            str(self.ui.packageOutputDirectoryLineEdit.text)
+            if hasattr(self.ui, "packageOutputDirectoryLineEdit")
+            else str(self._parameterNode.packageOutputDirectory)
+        )
+
+        self._parameterNode.packageMode = packageMode
+        self._parameterNode.packageBaseName = packageBaseName
+        self._parameterNode.packageOutputDirectory = packageOutputDirectory
+
+        return ReproducibilityPackageConfig(
+            packageMode=packageMode,
+            includeBenchmarkArtifacts=bool(self._parameterNode.includeBenchmarkArtifacts),
+            includeScenarioRegistry=bool(self._parameterNode.includeScenarioRegistry),
+            includeCohortStudyArtifacts=bool(self._parameterNode.includeCohortStudyArtifacts),
+            includeStudyAnalytics=bool(self._parameterNode.includeStudyAnalytics),
+            includeReports=bool(self._parameterNode.includeReports),
+            includeCanonicalJson=bool(self._parameterNode.includeCanonicalJson),
+            includeValidationResults=bool(self._parameterNode.includeValidationResults),
+            packageBaseName=packageBaseName,
+            outputDirectory=packageOutputDirectory,
+            lastPackageSequence=int(self._parameterNode.lastReproducibilityPackageSequence),
+        )
+
+    def onGenerateReproducibilityPackageButton(self) -> None:
+        with slicer.util.tryWithErrorDisplay(_("Failed to generate reproducibility package."), waitCursor=True):
+            if not self.logic or not self._parameterNode:
+                raise RuntimeError("Module logic is not initialized.")
+
+            packageConfig = self._buildReproducibilityPackageConfig()
+            packageResult = self.logic.assembleReproducibilityPackage(self._parameterNode, packageConfig)
+
+            self._parameterNode.lastReproducibilityPackageSequence = int(packageResult["packageSequence"])
+            self._parameterNode.packageOutputDirectory = str(packageResult["packageDirectory"])
+            if hasattr(self.ui, "packageOutputDirectoryLineEdit"):
+                self.ui.packageOutputDirectoryLineEdit.text = str(self._parameterNode.packageOutputDirectory)
+
+            packageSummaryTable = self.logic.createOrReuseOwnedOutputNode(
+                "vtkMRMLTableNode",
+                REPRODUCIBILITY_PACKAGE_SUMMARY_TABLE_NODE_NAME,
+                GENERATED_REPRODUCIBILITY_PACKAGE_SUMMARY_TABLE_ATTRIBUTE,
+                self._parameterNode.reproducibilityPackageSummaryTable,
+            )
+            manifestPreviewTable = self.logic.createOrReuseOwnedOutputNode(
+                "vtkMRMLTableNode",
+                REPRODUCIBILITY_MANIFEST_PREVIEW_TABLE_NODE_NAME,
+                GENERATED_REPRODUCIBILITY_MANIFEST_PREVIEW_TABLE_ATTRIBUTE,
+                self._parameterNode.reproducibilityManifestPreviewTable,
+            )
+            artifactIndexTable = self.logic.createOrReuseOwnedOutputNode(
+                "vtkMRMLTableNode",
+                REPRODUCIBILITY_ARTIFACT_INDEX_TABLE_NODE_NAME,
+                GENERATED_REPRODUCIBILITY_ARTIFACT_INDEX_TABLE_ATTRIBUTE,
+                self._parameterNode.reproducibilityArtifactIndexTable,
+            )
+
+            self.logic.populateReproducibilityPackageSummaryTable(
+                packageSummaryTable,
+                {
+                    "PackageMode": packageConfig.packageMode,
+                    "PackageBaseName": packageConfig.packageBaseName,
+                    "PackagePath": str(packageResult["packagePath"]),
+                    "PackageDirectory": str(packageResult["packageDirectory"]),
+                    "ArtifactCount": int(packageResult["artifactCount"]),
+                    "WarningCount": int(packageResult["warningCount"]),
+                    "LastPackageStatus": str(packageResult["status"]),
+                    "LastPackageSequence": int(packageResult["packageSequence"]),
+                },
+            )
+            manifestDict = asdict(packageResult["manifest"])
+            self.logic.populateReproducibilityManifestPreviewTable(manifestPreviewTable, manifestDict)
+            self.logic.populateReproducibilityArtifactIndexTable(
+                artifactIndexTable,
+                packageResult["artifactEntries"],
+            )
+
+            self._parameterNode.reproducibilityPackageSummaryTable = packageSummaryTable
+            self._parameterNode.reproducibilityManifestPreviewTable = manifestPreviewTable
+            self._parameterNode.reproducibilityArtifactIndexTable = artifactIndexTable
+
+            if hasattr(self.ui, "reproducibilityStatusLabel"):
+                self.ui.reproducibilityStatusLabel.text = (
+                    f"Package {int(packageResult['packageSequence']):04d}: "
+                    f"{int(packageResult['artifactCount'])} artifacts, "
+                    f"{int(packageResult['warningCount'])} warning(s)"
+                )
+            self._updateButtonStates()
+
     def _buildPlanExportConfig(self) -> PlanExportConfig:
         if not self._parameterNode:
             return PlanExportConfig()
@@ -1497,6 +1713,9 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         addTable("cohort_case_summary.csv", parameterNode.cohortCaseSummaryTable)
         addTable("cohort_aggregate_metrics.csv", parameterNode.cohortAggregateMetricsTable)
         addTable("cohort_comparison_summary.csv", parameterNode.cohortComparisonSummaryTable)
+        addTable("reproducibility_package_summary.csv", parameterNode.reproducibilityPackageSummaryTable)
+        addTable("reproducibility_manifest_preview.csv", parameterNode.reproducibilityManifestPreviewTable)
+        addTable("reproducibility_artifact_index.csv", parameterNode.reproducibilityArtifactIndexTable)
 
         if exportConfig.includeCoverageTables:
             addTable("coverage_summary.csv", self._findFirstTableNodeByName("SV3D Coverage Summary"))
@@ -1666,6 +1885,579 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             "fileCount": int(len(exportedFiles)),
             "status": "Success",
             "selectedScenarioName": str(selectedScenarioSummary.get("ScenarioName", "")),
+        }
+
+    @staticmethod
+    def buildDeterministicReproPackagePath(outputDirectory: str, packageBaseName: str, packageSequence: int) -> Path:
+        bundleBaseName = SurgicalVision3D_PlannerLogic.sanitizeExportBaseName(packageBaseName)
+        rootDirectory = Path(outputDirectory)
+        return rootDirectory / f"{bundleBaseName}_{int(packageSequence):04d}"
+
+    @staticmethod
+    def computeArtifactIntegritySummary(artifactPath: Path, includeHash: bool = True) -> dict[str, Any]:
+        sizeBytes = int(artifactPath.stat().st_size) if artifactPath.exists() else 0
+        sha256Value = ""
+        # Keep hashing cheap for reviewer package generation on large datasets.
+        if includeHash and artifactPath.exists() and artifactPath.is_file() and sizeBytes <= 5_000_000:
+            sha256Hasher = hashlib.sha256()
+            with artifactPath.open("rb") as binaryFile:
+                while True:
+                    chunk = binaryFile.read(65536)
+                    if not chunk:
+                        break
+                    sha256Hasher.update(chunk)
+            sha256Value = sha256Hasher.hexdigest()
+        return {
+            "sizeBytes": sizeBytes,
+            "sha256": sha256Value,
+        }
+
+    @staticmethod
+    def _resolveResourcePath(relativePath: str) -> Path:
+        return (Path(__file__).resolve().parent / relativePath).resolve()
+
+    def collectReproducibilityArtifacts(
+        self,
+        parameterNode: SurgicalVision3D_PlannerParameterNode,
+        packageConfig: ReproducibilityPackageConfig,
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        artifactPlans: list[dict[str, Any]] = []
+        warnings: list[str] = []
+
+        def addCopyArtifact(
+            artifactKey: str,
+            category: str,
+            relativePath: str,
+            sourcePath: Path,
+            requiredByMode: bool = False,
+        ) -> None:
+            artifactPlans.append(
+                {
+                    "artifactKey": artifactKey,
+                    "category": category,
+                    "relativePath": relativePath.replace("\\", "/"),
+                    "mode": "copy",
+                    "sourcePath": str(sourcePath),
+                    "requiredByMode": bool(requiredByMode),
+                }
+            )
+
+        def addTableArtifact(
+            artifactKey: str,
+            category: str,
+            relativePath: str,
+            tableNode: vtkMRMLTableNode | None,
+            requiredByMode: bool = False,
+        ) -> None:
+            artifactPlans.append(
+                {
+                    "artifactKey": artifactKey,
+                    "category": category,
+                    "relativePath": relativePath.replace("\\", "/"),
+                    "mode": "table_csv",
+                    "tableNode": tableNode,
+                    "requiredByMode": bool(requiredByMode),
+                }
+            )
+
+        def addJsonArtifact(
+            artifactKey: str,
+            category: str,
+            relativePath: str,
+            payload: dict[str, Any] | list[dict[str, Any]],
+        ) -> None:
+            artifactPlans.append(
+                {
+                    "artifactKey": artifactKey,
+                    "category": category,
+                    "relativePath": relativePath.replace("\\", "/"),
+                    "mode": "json_data",
+                    "payload": payload,
+                    "requiredByMode": False,
+                }
+            )
+
+        reproducibilityResourceRoot = self._resolveResourcePath("Resources/Reproducibility")
+        addCopyArtifact(
+            "schema_package_v1",
+            "schemas",
+            "schemas/reproducibility_package_schema_v1.json",
+            reproducibilityResourceRoot / "reproducibility_package_schema_v1.json",
+            requiredByMode=True,
+        )
+        addCopyArtifact(
+            "schema_layout_v1",
+            "schemas",
+            "schemas/reproducibility_package_layout_v1.json",
+            reproducibilityResourceRoot / "reproducibility_package_layout_v1.json",
+            requiredByMode=True,
+        )
+        addCopyArtifact(
+            "example_config_v1",
+            "schemas",
+            "schemas/example_reviewer_package_config_v1.json",
+            reproducibilityResourceRoot / "example_reviewer_package_config_v1.json",
+            requiredByMode=False,
+        )
+        addCopyArtifact(
+            "package_readme_template",
+            "reports",
+            "README_package.md",
+            reproducibilityResourceRoot / "README_package_template.md",
+            requiredByMode=False,
+        )
+
+        if packageConfig.includeBenchmarkArtifacts:
+            benchmarkResourceRoot = self._resolveResourcePath("Resources/Benchmarks")
+            if benchmarkResourceRoot.exists():
+                for benchmarkFile in sorted(path for path in benchmarkResourceRoot.rglob("*") if path.is_file()):
+                    relativeBenchmarkPath = benchmarkFile.relative_to(benchmarkResourceRoot).as_posix()
+                    addCopyArtifact(
+                        f"benchmark_resource::{relativeBenchmarkPath}",
+                        "benchmarks",
+                        f"benchmarks/{relativeBenchmarkPath}",
+                        benchmarkFile,
+                        requiredByMode=False,
+                    )
+            else:
+                warnings.append("Benchmark resources folder was not found; benchmark definitions were skipped.")
+
+            addTableArtifact(
+                "benchmark_case_summary",
+                "validation",
+                "validation/benchmark_case_summary.csv",
+                self._findFirstTableNodeByName("SV3D Benchmark Case Summary"),
+                requiredByMode=False,
+            )
+            addTableArtifact(
+                "benchmark_validation_summary",
+                "validation",
+                "validation/benchmark_validation_summary.csv",
+                self._findFirstTableNodeByName("SV3D Benchmark Validation Summary"),
+                requiredByMode=False,
+            )
+            addTableArtifact(
+                "benchmark_metric_delta_summary",
+                "validation",
+                "validation/benchmark_metric_delta_summary.csv",
+                self._findFirstTableNodeByName("SV3D Benchmark Metric Delta Summary"),
+                requiredByMode=False,
+            )
+            addTableArtifact(
+                "benchmark_reproducibility_summary",
+                "validation",
+                "validation/benchmark_reproducibility_summary.csv",
+                self._findFirstTableNodeByName("SV3D Benchmark Reproducibility Summary"),
+                requiredByMode=False,
+            )
+
+        if packageConfig.includeValidationResults:
+            addTableArtifact(
+                "trajectory_verification_summary",
+                "validation",
+                "validation/trajectory_verification_summary.csv",
+                self._findFirstTableNodeByName("SV3D Trajectory Verification Summary"),
+                requiredByMode=False,
+            )
+            addTableArtifact(
+                "plan_verification_summary",
+                "validation",
+                "validation/plan_verification_summary.csv",
+                self._findFirstTableNodeByName("SV3D Plan Verification Summary"),
+                requiredByMode=False,
+            )
+
+        if packageConfig.includeCohortStudyArtifacts:
+            cohortResourceRoot = self._resolveResourcePath("Resources/Cohorts")
+            if cohortResourceRoot.exists():
+                for cohortFile in sorted(path for path in cohortResourceRoot.rglob("*") if path.is_file()):
+                    relativeCohortPath = cohortFile.relative_to(cohortResourceRoot).as_posix()
+                    addCopyArtifact(
+                        f"cohort_resource::{relativeCohortPath}",
+                        "cohorts",
+                        f"cohorts/resources/{relativeCohortPath}",
+                        cohortFile,
+                        requiredByMode=False,
+                    )
+            addTableArtifact(
+                "cohort_execution_summary",
+                "cohorts",
+                "cohorts/cohort_execution_summary.csv",
+                parameterNode.cohortExecutionSummaryTable,
+                requiredByMode=False,
+            )
+            addTableArtifact(
+                "cohort_case_summary",
+                "cohorts",
+                "cohorts/cohort_case_summary.csv",
+                parameterNode.cohortCaseSummaryTable,
+                requiredByMode=False,
+            )
+            addTableArtifact(
+                "cohort_aggregate_metrics",
+                "cohorts",
+                "cohorts/cohort_aggregate_metrics.csv",
+                parameterNode.cohortAggregateMetricsTable,
+                requiredByMode=False,
+            )
+            addTableArtifact(
+                "cohort_comparison_summary",
+                "cohorts",
+                "cohorts/cohort_comparison_summary.csv",
+                parameterNode.cohortComparisonSummaryTable,
+                requiredByMode=False,
+            )
+            resolvedCohortDefinitionPath = self._resolveModuleRelativePath(str(parameterNode.cohortStudyDefinitionPath or ""))
+            if str(parameterNode.cohortStudyDefinitionPath or "").strip():
+                addCopyArtifact(
+                    "selected_cohort_definition",
+                    "cohorts",
+                    "cohorts/selected_cohort_definition.json",
+                    resolvedCohortDefinitionPath,
+                    requiredByMode=False,
+                )
+
+        if packageConfig.includeStudyAnalytics:
+            addTableArtifact(
+                "study_summary",
+                "study_analytics",
+                "study_analytics/study_summary.csv",
+                self._findFirstTableNodeByName("SV3D Study Summary"),
+                requiredByMode=False,
+            )
+            addTableArtifact(
+                "study_aggregate_table",
+                "study_analytics",
+                "study_analytics/study_aggregate_table.csv",
+                self._findFirstTableNodeByName("SV3D Study Aggregate Table"),
+                requiredByMode=False,
+            )
+            addTableArtifact(
+                "study_group_comparison",
+                "study_analytics",
+                "study_analytics/study_group_comparison.csv",
+                self._findFirstTableNodeByName("SV3D Study Group Comparison"),
+                requiredByMode=False,
+            )
+            addTableArtifact(
+                "study_publication_table_pack",
+                "study_analytics",
+                "study_analytics/study_publication_table_pack.csv",
+                self._findFirstTableNodeByName("SV3D Study Publication Table Pack"),
+                requiredByMode=False,
+            )
+
+        if packageConfig.includeReports:
+            addTableArtifact(
+                "report_summary",
+                "reports",
+                "reports/report_summary.csv",
+                self._findFirstTableNodeByName("SV3D Report Summary"),
+                requiredByMode=False,
+            )
+            addTableArtifact(
+                "report_sections",
+                "reports",
+                "reports/report_sections.csv",
+                self._findFirstTableNodeByName("SV3D Report Sections"),
+                requiredByMode=False,
+            )
+            addTableArtifact(
+                "report_metrics",
+                "reports",
+                "reports/report_metrics.csv",
+                self._findFirstTableNodeByName("SV3D Report Metrics"),
+                requiredByMode=False,
+            )
+
+            lastExportDirectory = str(parameterNode.lastExportDirectory or "").strip()
+            if lastExportDirectory and int(parameterNode.lastExportSequence) > 0:
+                latestExportBundlePath = self.buildDeterministicBundlePath(
+                    lastExportDirectory,
+                    str(parameterNode.exportBaseName or "SV3D_Export"),
+                    int(parameterNode.lastExportSequence),
+                )
+                if latestExportBundlePath.exists() and latestExportBundlePath.is_dir():
+                    for bundleFile in sorted(path for path in latestExportBundlePath.rglob("*") if path.is_file()):
+                        relativeBundlePath = bundleFile.relative_to(latestExportBundlePath).as_posix()
+                        addCopyArtifact(
+                            f"latest_export_bundle::{relativeBundlePath}",
+                            "exports",
+                            f"exports/latest_export_bundle/{relativeBundlePath}",
+                            bundleFile,
+                            requiredByMode=False,
+                        )
+
+        if packageConfig.includeScenarioRegistry:
+            scenarioRegistryTable = self._findFirstTableNodeByName("SV3D Scenario Registry")
+            recommendationTable = self._findFirstTableNodeByName("SV3D Feasible Candidate Recommendation")
+            addTableArtifact(
+                "scenario_registry_csv",
+                "exports",
+                "exports/provenance/scenario_registry.csv",
+                scenarioRegistryTable,
+                requiredByMode=False,
+            )
+            addTableArtifact(
+                "recommendation_summary_csv",
+                "exports",
+                "exports/provenance/recommendation_summary.csv",
+                recommendationTable,
+                requiredByMode=False,
+            )
+
+        if packageConfig.includeCanonicalJson:
+            currentPlanSummary, _ = self.collectCurrentPlanExportData(
+                parameterNode,
+                PlanExportConfig(
+                    includeWorkingPlan=True,
+                    includeSelectedScenario=False,
+                    includeScenarioComparison=False,
+                    includeRecommendationOutputs=False,
+                    includeTrajectoryTables=False,
+                    includeSafetyTables=False,
+                    includeCoverageTables=False,
+                    includeFeasibilityTables=False,
+                    includeCoordinationTables=False,
+                ),
+            )
+            addJsonArtifact(
+                "canonical_current_plan_summary",
+                "canonical_json",
+                "canonical_json/current_plan_summary.json",
+                currentPlanSummary,
+            )
+            scenarioRegistryTable = self._findFirstTableNodeByName("SV3D Scenario Registry")
+            if scenarioRegistryTable:
+                addJsonArtifact(
+                    "canonical_scenario_registry",
+                    "canonical_json",
+                    "canonical_json/scenario_registry.json",
+                    self._tableNodeToDictionaries(scenarioRegistryTable),
+                )
+            recommendationTable = self._findFirstTableNodeByName("SV3D Feasible Candidate Recommendation")
+            if recommendationTable:
+                addJsonArtifact(
+                    "canonical_recommendation_summary",
+                    "canonical_json",
+                    "canonical_json/recommendation_summary.json",
+                    self._tableNodeToDictionaries(recommendationTable),
+                )
+
+        return artifactPlans, warnings
+
+    def copyOrRegenerateArtifactSet(
+        self,
+        packagePath: Path,
+        artifactPlans: Sequence[dict[str, Any]],
+    ) -> tuple[list[ReproducibilityArtifactEntry], list[str]]:
+        artifactEntries: list[ReproducibilityArtifactEntry] = []
+        warnings: list[str] = []
+
+        for artifactPlan in sorted(
+            artifactPlans,
+            key=lambda plan: (str(plan.get("relativePath", "")), str(plan.get("artifactKey", ""))),
+        ):
+            artifactKey = str(artifactPlan.get("artifactKey", ""))
+            category = str(artifactPlan.get("category", "uncategorized"))
+            relativePath = str(artifactPlan.get("relativePath", "")).replace("\\", "/")
+            mode = str(artifactPlan.get("mode", ""))
+            requiredByMode = bool(artifactPlan.get("requiredByMode", False))
+            destinationPath = packagePath / relativePath
+
+            entry = ReproducibilityArtifactEntry(
+                artifactKey=artifactKey,
+                category=category,
+                relativePath=relativePath,
+                status="Missing",
+            )
+
+            try:
+                if mode == "copy":
+                    sourcePath = Path(str(artifactPlan.get("sourcePath", "")))
+                    entry.sourcePath = str(sourcePath)
+                    if sourcePath.exists() and sourcePath.is_file():
+                        destinationPath.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(sourcePath, destinationPath)
+                        integrity = self.computeArtifactIntegritySummary(destinationPath, includeHash=True)
+                        entry.status = "Copied"
+                        entry.sizeBytes = int(integrity["sizeBytes"])
+                        entry.sha256 = str(integrity["sha256"])
+                    else:
+                        warningText = f"Artifact source is missing: {sourcePath}"
+                        entry.warning = warningText
+                        warnings.append(warningText)
+                        if requiredByMode:
+                            raise ValueError(warningText)
+                elif mode == "table_csv":
+                    tableNode = artifactPlan.get("tableNode")
+                    if tableNode and slicer.mrmlScene.IsNodePresent(tableNode):
+                        self.exportTableNodeToCsv(tableNode, destinationPath)
+                        integrity = self.computeArtifactIntegritySummary(destinationPath, includeHash=True)
+                        entry.status = "GeneratedCSV"
+                        entry.sourcePath = str(tableNode.GetID())
+                        entry.sizeBytes = int(integrity["sizeBytes"])
+                        entry.sha256 = str(integrity["sha256"])
+                    else:
+                        warningText = f"Source table is not available for artifact '{artifactKey}'."
+                        entry.warning = warningText
+                        warnings.append(warningText)
+                        if requiredByMode:
+                            raise ValueError(warningText)
+                elif mode == "json_data":
+                    payload = artifactPlan.get("payload")
+                    self.exportStructuredSummaryToJson(destinationPath, payload if payload is not None else {})
+                    integrity = self.computeArtifactIntegritySummary(destinationPath, includeHash=True)
+                    entry.status = "GeneratedJSON"
+                    entry.sourcePath = "InSceneSummary"
+                    entry.sizeBytes = int(integrity["sizeBytes"])
+                    entry.sha256 = str(integrity["sha256"])
+                else:
+                    warningText = f"Unsupported artifact mode '{mode}' for artifact '{artifactKey}'."
+                    entry.warning = warningText
+                    warnings.append(warningText)
+                    if requiredByMode:
+                        raise ValueError(warningText)
+            except Exception as exc:
+                if requiredByMode:
+                    raise
+                warningText = f"{artifactKey}: {exc}"
+                entry.warning = warningText
+                warnings.append(warningText)
+
+            artifactEntries.append(entry)
+
+        return artifactEntries, warnings
+
+    def buildReproducibilityManifest(
+        self,
+        packageConfig: ReproducibilityPackageConfig,
+        packageSequence: int,
+        artifactEntries: Sequence[ReproducibilityArtifactEntry],
+        warnings: Sequence[str],
+    ) -> ReproducibilityManifest:
+        scenarioRegistryRows = self._tableNodeToDictionaries(self._findFirstTableNodeByName("SV3D Scenario Registry"))
+        benchmarkRows = self._tableNodeToDictionaries(self._findFirstTableNodeByName("SV3D Benchmark Case Summary"))
+        cohortExecutionRows = self._tableNodeToDictionaries(self._findFirstTableNodeByName(COHORT_EXECUTION_SUMMARY_TABLE_NODE_NAME))
+        reportRows = self._tableNodeToDictionaries(self._findFirstTableNodeByName("SV3D Report Summary"))
+
+        def collectValues(rows: Sequence[dict[str, Any]], keyCandidates: Sequence[str]) -> list[str]:
+            values: list[str] = []
+            seen: set[str] = set()
+            for row in rows:
+                for keyCandidate in keyCandidates:
+                    rawValue = str(row.get(keyCandidate, "")).strip()
+                    if rawValue and rawValue not in seen:
+                        seen.add(rawValue)
+                        values.append(rawValue)
+                        break
+            return sorted(values)
+
+        studyIds: list[str] = []
+        for row in cohortExecutionRows:
+            if "Field" in row and "Value" in row and str(row.get("Field", "")).strip() == "StudyID":
+                value = str(row.get("Value", "")).strip()
+                if value:
+                    studyIds.append(value)
+        studyIds = sorted(set(studyIds))
+
+        manifestArtifacts = [asdict(entry) for entry in sorted(artifactEntries, key=lambda item: item.relativePath)]
+        manifestWarnings = sorted(set(str(warning) for warning in warnings if str(warning).strip()))
+        return ReproducibilityManifest(
+            packageId=f"SV3D-Repro-{int(packageSequence):04d}",
+            packageTimestampISO=datetime.now().isoformat(timespec="seconds"),
+            packageSequence=int(packageSequence),
+            packageMode=str(packageConfig.packageMode),
+            packageBaseName=str(packageConfig.packageBaseName),
+            createdByModule="SurgicalVision3D_Planner",
+            schemaVersions={
+                "reproducibilityPackageSchema": "v1",
+                "reproducibilityLayoutSchema": "v1",
+                "phaseMarker": "Phase12B",
+            },
+            includedArtifacts=manifestArtifacts,
+            benchmarkCaseIds=collectValues(benchmarkRows, ["CaseID", "caseId"]),
+            studyIds=studyIds,
+            scenarioIds=collectValues(scenarioRegistryRows, ["ScenarioID", "scenarioId"]),
+            reportIds=collectValues(reportRows, ["ReportID", "reportId"]),
+            warnings=manifestWarnings,
+            notes="Deterministic frozen reproducibility package; missing optional artifacts are listed in warnings.",
+        )
+
+    def assembleReproducibilityPackage(
+        self,
+        parameterNode: SurgicalVision3D_PlannerParameterNode,
+        packageConfig: ReproducibilityPackageConfig,
+    ) -> dict[str, Any]:
+        if not str(packageConfig.packageBaseName).strip():
+            raise ValueError("Reproducibility package base name is required.")
+
+        packageDirectory = str(packageConfig.outputDirectory).strip() or str(
+            Path(slicer.app.temporaryPath) / "SurgicalVision3D_PlannerReproducibilityPackages"
+        )
+        packageRoot = Path(packageDirectory)
+        packageRoot.mkdir(parents=True, exist_ok=True)
+
+        packageSequence = max(1, int(packageConfig.lastPackageSequence) + 1)
+        packagePath = self.buildDeterministicReproPackagePath(packageDirectory, packageConfig.packageBaseName, packageSequence)
+        while packagePath.exists():
+            packageSequence += 1
+            packagePath = self.buildDeterministicReproPackagePath(packageDirectory, packageConfig.packageBaseName, packageSequence)
+        packagePath.mkdir(parents=True, exist_ok=False)
+
+        # Keep the layout explicit and stable even when specific sections are empty.
+        for subDirectory in (
+            "schemas",
+            "benchmarks",
+            "validation",
+            "cohorts",
+            "study_analytics",
+            "reports",
+            "exports",
+            "canonical_json",
+        ):
+            (packagePath / subDirectory).mkdir(parents=True, exist_ok=True)
+
+        artifactPlans, collectionWarnings = self.collectReproducibilityArtifacts(parameterNode, packageConfig)
+        artifactEntries, assemblyWarnings = self.copyOrRegenerateArtifactSet(packagePath, artifactPlans)
+        combinedWarnings = sorted(set(collectionWarnings + assemblyWarnings))
+
+        manifest = self.buildReproducibilityManifest(
+            packageConfig=packageConfig,
+            packageSequence=packageSequence,
+            artifactEntries=artifactEntries,
+            warnings=combinedWarnings,
+        )
+        manifestPath = packagePath / "manifest.json"
+        self.exportStructuredSummaryToJson(manifestPath, asdict(manifest))
+        manifestIntegrity = self.computeArtifactIntegritySummary(manifestPath, includeHash=True)
+        artifactEntries.append(
+            ReproducibilityArtifactEntry(
+                artifactKey="manifest",
+                category="schemas",
+                relativePath="manifest.json",
+                status="GeneratedJSON",
+                sourcePath="InSceneSummary",
+                sizeBytes=int(manifestIntegrity["sizeBytes"]),
+                sha256=str(manifestIntegrity["sha256"]),
+                warning="",
+            )
+        )
+
+        # Rewrite manifest to include manifest.json in the artifact list deterministically.
+        manifest.includedArtifacts = [asdict(entry) for entry in sorted(artifactEntries, key=lambda item: item.relativePath)]
+        self.exportStructuredSummaryToJson(manifestPath, asdict(manifest))
+
+        statusText = "SuccessWithWarnings" if len(combinedWarnings) > 0 else "Success"
+        return {
+            "manifest": manifest,
+            "packagePath": str(packagePath),
+            "packageDirectory": str(packageRoot),
+            "packageSequence": int(packageSequence),
+            "artifactEntries": sorted(artifactEntries, key=lambda item: item.relativePath),
+            "artifactCount": int(len(artifactEntries)),
+            "warningCount": int(len(combinedWarnings)),
+            "status": statusText,
         }
 
     @staticmethod
@@ -3601,6 +4393,82 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         tableNode.RemoveAllColumns()
         self._addStringColumn(tableNode, "Field", previewFields)
         self._addStringColumn(tableNode, "Value", [str(manifestValues.get(field, "")) for field in previewFields])
+
+    def populateReproducibilityPackageSummaryTable(
+        self,
+        tableNode: vtkMRMLTableNode | None,
+        summaryValues: dict[str, Any],
+    ) -> None:
+        if not tableNode:
+            raise ValueError("Reproducibility package summary table node is required.")
+
+        orderedFields = [
+            "PackageMode",
+            "PackageBaseName",
+            "PackagePath",
+            "PackageDirectory",
+            "ArtifactCount",
+            "WarningCount",
+            "LastPackageStatus",
+            "LastPackageSequence",
+        ]
+        tableNode.RemoveAllColumns()
+        self._addStringColumn(tableNode, "Field", orderedFields)
+        self._addStringColumn(tableNode, "Value", [str(summaryValues.get(field, "")) for field in orderedFields])
+
+    def populateReproducibilityManifestPreviewTable(
+        self,
+        tableNode: vtkMRMLTableNode | None,
+        manifestValues: dict[str, Any],
+    ) -> None:
+        if not tableNode:
+            raise ValueError("Reproducibility manifest preview table node is required.")
+
+        previewFields = [
+            "packageId",
+            "packageTimestampISO",
+            "packageSequence",
+            "packageMode",
+            "packageBaseName",
+            "createdByModule",
+            "benchmarkCaseIds",
+            "studyIds",
+            "scenarioIds",
+            "reportIds",
+            "warnings",
+            "notes",
+        ]
+        tableNode.RemoveAllColumns()
+        self._addStringColumn(tableNode, "Field", previewFields)
+        previewValues: list[str] = []
+        for fieldName in previewFields:
+            value = manifestValues.get(fieldName, "")
+            if isinstance(value, list):
+                previewValues.append(";".join(str(item) for item in value))
+            elif isinstance(value, dict):
+                previewValues.append(json.dumps(value, sort_keys=True))
+            else:
+                previewValues.append(str(value))
+        self._addStringColumn(tableNode, "Value", previewValues)
+
+    def populateReproducibilityArtifactIndexTable(
+        self,
+        tableNode: vtkMRMLTableNode | None,
+        artifactEntries: Sequence[ReproducibilityArtifactEntry],
+    ) -> None:
+        if not tableNode:
+            raise ValueError("Reproducibility artifact index table node is required.")
+
+        orderedEntries = sorted(artifactEntries, key=lambda entry: entry.relativePath)
+        tableNode.RemoveAllColumns()
+        self._addStringColumn(tableNode, "ArtifactKey", [str(entry.artifactKey) for entry in orderedEntries])
+        self._addStringColumn(tableNode, "Category", [str(entry.category) for entry in orderedEntries])
+        self._addStringColumn(tableNode, "RelativePath", [str(entry.relativePath) for entry in orderedEntries])
+        self._addStringColumn(tableNode, "Status", [str(entry.status) for entry in orderedEntries])
+        self._addStringColumn(tableNode, "SourcePath", [str(entry.sourcePath) for entry in orderedEntries])
+        self._addNumericColumn(tableNode, "SizeBytes", [int(entry.sizeBytes) for entry in orderedEntries], integer=True)
+        self._addStringColumn(tableNode, "SHA256", [str(entry.sha256) for entry in orderedEntries])
+        self._addStringColumn(tableNode, "Warning", [str(entry.warning) for entry in orderedEntries])
 
     @staticmethod
     def _addStringColumn(tableNode: vtkMRMLTableNode, columnName: str, values: Sequence[float | int | str]) -> None:

@@ -884,6 +884,9 @@
      </item>
       <item row="1" column="1">
        <widget class="QComboBox" name="cohortExecutionModeComboBox">
+        <property name="SlicerParameterName" stdset="0">
+         <string>cohortExecutionMode</string>
+        </property>
         <item>
          <property name="text">
           <string>ScenarioRegistry</string>
@@ -1057,6 +1060,218 @@
    </widget>
   </item>
   <item>
+   <widget class="ctkCollapsibleButton" name="reproducibilityCollapsibleButton">
+    <property name="text">
+     <string>Reproducibility Package</string>
+    </property>
+    <layout class="QFormLayout" name="reproducibilityFormLayout">
+     <item row="0" column="0">
+      <widget class="QLabel" name="packageModeLabel">
+       <property name="text">
+        <string>Package mode:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="0" column="1">
+      <widget class="QComboBox" name="packageModeComboBox">
+       <property name="SlicerParameterName" stdset="0">
+        <string>packageMode</string>
+       </property>
+       <item>
+        <property name="text">
+         <string>ReviewerSupplement</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>ValidationArchive</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>InternalHandoff</string>
+        </property>
+       </item>
+      </widget>
+     </item>
+     <item row="1" column="0">
+      <widget class="QLabel" name="includeBenchmarkArtifactsLabel">
+       <property name="text">
+        <string>Include benchmark artifacts:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="1" column="1">
+      <widget class="QCheckBox" name="includeBenchmarkArtifactsCheckBox">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>includeBenchmarkArtifacts</string>
+       </property>
+      </widget>
+     </item>
+     <item row="2" column="0">
+      <widget class="QLabel" name="includeScenarioRegistryLabel">
+       <property name="text">
+        <string>Include scenario registry:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="2" column="1">
+      <widget class="QCheckBox" name="includeScenarioRegistryCheckBox">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>includeScenarioRegistry</string>
+       </property>
+      </widget>
+     </item>
+     <item row="3" column="0">
+      <widget class="QLabel" name="includeCohortStudyArtifactsLabel">
+       <property name="text">
+        <string>Include cohort/study artifacts:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="3" column="1">
+      <widget class="QCheckBox" name="includeCohortStudyArtifactsCheckBox">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>includeCohortStudyArtifacts</string>
+       </property>
+      </widget>
+     </item>
+     <item row="4" column="0">
+      <widget class="QLabel" name="includeStudyAnalyticsLabel">
+       <property name="text">
+        <string>Include study analytics:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="4" column="1">
+      <widget class="QCheckBox" name="includeStudyAnalyticsCheckBox">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>includeStudyAnalytics</string>
+       </property>
+      </widget>
+     </item>
+     <item row="5" column="0">
+      <widget class="QLabel" name="includeReportsLabel">
+       <property name="text">
+        <string>Include reports:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="5" column="1">
+      <widget class="QCheckBox" name="includeReportsCheckBox">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>includeReports</string>
+       </property>
+      </widget>
+     </item>
+     <item row="6" column="0">
+      <widget class="QLabel" name="includeCanonicalJsonLabel">
+       <property name="text">
+        <string>Include canonical JSON:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="6" column="1">
+      <widget class="QCheckBox" name="includeCanonicalJsonCheckBox">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>includeCanonicalJson</string>
+       </property>
+      </widget>
+     </item>
+     <item row="7" column="0">
+      <widget class="QLabel" name="includeValidationResultsLabel">
+       <property name="text">
+        <string>Include validation results:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="7" column="1">
+      <widget class="QCheckBox" name="includeValidationResultsCheckBox">
+       <property name="text">
+        <string/>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>includeValidationResults</string>
+       </property>
+      </widget>
+     </item>
+     <item row="8" column="0">
+      <widget class="QLabel" name="packageBaseNameLabel">
+       <property name="text">
+        <string>Package base name:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="8" column="1">
+      <widget class="QLineEdit" name="packageBaseNameLineEdit">
+       <property name="text">
+        <string>SV3D_ReproducibilityPackage</string>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>packageBaseName</string>
+       </property>
+      </widget>
+     </item>
+     <item row="9" column="0">
+      <widget class="QLabel" name="packageOutputDirectoryLabel">
+       <property name="text">
+        <string>Output directory:</string>
+       </property>
+      </widget>
+     </item>
+     <item row="9" column="1">
+      <widget class="QLineEdit" name="packageOutputDirectoryLineEdit">
+       <property name="placeholderText">
+        <string>Defaults to Slicer temp reproducibility folder when empty</string>
+       </property>
+       <property name="SlicerParameterName" stdset="0">
+        <string>packageOutputDirectory</string>
+       </property>
+      </widget>
+     </item>
+     <item row="10" column="0" colspan="2">
+      <layout class="QHBoxLayout" name="reproducibilityControlsLayout">
+       <item>
+        <widget class="QPushButton" name="generateReproducibilityPackageButton">
+         <property name="enabled">
+          <bool>true</bool>
+         </property>
+         <property name="text">
+          <string>Generate Reproducibility Package</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="reproducibilityStatusLabel">
+         <property name="text">
+          <string>Reproducibility package not generated.</string>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </item>
+    </layout>
+   </widget>
+  </item>
+  <item>
    <widget class="ctkCollapsibleButton" name="exportCollapsibleButton">
     <property name="text">
      <string>Export</string>
@@ -1071,6 +1286,9 @@
      </item>
       <item row="0" column="1">
        <widget class="QComboBox" name="exportModeComboBox">
+        <property name="SlicerParameterName" stdset="0">
+         <string>exportMode</string>
+        </property>
         <item>
          <property name="text">
           <string>CurrentWorkingPlan</string>

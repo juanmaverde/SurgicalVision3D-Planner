@@ -49,6 +49,11 @@ class SurgicalVision3D_PlannerPhase1Test(ScriptedLoadableModuleTest):
         self.test_cohort_batch_execution_and_aggregation()
         self.test_cohort_output_tables_are_reused_deterministically()
         self.test_cohort_export_collection_includes_cohort_tables()
+        self.test_reproducibility_manifest_creation_and_sorting()
+        self.test_reproducibility_package_path_generation()
+        self.test_reproducibility_package_assembly_handles_missing_optional_artifacts()
+        self.test_repeated_reproducibility_package_sequence_behavior()
+        self.test_reproducibility_preview_tables_are_reused_deterministically()
         self.test_recolor_restore_uses_full_array_length()
         self.test_parameter_node_restore_round_trip()
 
@@ -1079,6 +1084,227 @@ class SurgicalVision3D_PlannerPhase1Test(ScriptedLoadableModuleTest):
         self.assertIn("cohort_case_summary.csv", exportedNames)
         self.assertIn("cohort_aggregate_metrics.csv", exportedNames)
         self.assertIn("cohort_comparison_summary.csv", exportedNames)
+
+    def test_reproducibility_manifest_creation_and_sorting(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        config = planner.ReproducibilityPackageConfig(
+            packageMode="ReviewerSupplement",
+            packageBaseName="ReviewerPack",
+        )
+        artifactEntries = [
+            planner.ReproducibilityArtifactEntry(
+                artifactKey="b",
+                category="validation",
+                relativePath="validation/b.csv",
+                status="GeneratedCSV",
+                sizeBytes=20,
+            ),
+            planner.ReproducibilityArtifactEntry(
+                artifactKey="a",
+                category="schemas",
+                relativePath="schemas/a.json",
+                status="Copied",
+                sizeBytes=10,
+            ),
+        ]
+        manifest = logic.buildReproducibilityManifest(
+            packageConfig=config,
+            packageSequence=4,
+            artifactEntries=artifactEntries,
+            warnings=["z warning", "a warning", "z warning"],
+        )
+        self.assertEqual(manifest.packageId, "SV3D-Repro-0004")
+        self.assertEqual(manifest.packageMode, "ReviewerSupplement")
+        self.assertEqual(manifest.includedArtifacts[0]["relativePath"], "schemas/a.json")
+        self.assertEqual(manifest.includedArtifacts[1]["relativePath"], "validation/b.csv")
+        self.assertEqual(manifest.warnings, ["a warning", "z warning"])
+
+    def test_reproducibility_package_path_generation(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        packagePath = logic.buildDeterministicReproPackagePath("C:/tmp/SV3D", "Reviewer Package", 12)
+        self.assertEqual(packagePath.name, "Reviewer_Package_0012")
+
+    def test_reproducibility_package_assembly_handles_missing_optional_artifacts(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        parameterNode = logic.getParameterNode()
+        outputRoot = Path(tempfile.mkdtemp(prefix="sv3d_repro_bundle_"))
+        try:
+            packageConfig = planner.ReproducibilityPackageConfig(
+                packageMode="ReviewerSupplement",
+                packageBaseName="Phase12B",
+                outputDirectory=str(outputRoot),
+                includeBenchmarkArtifacts=True,
+                includeScenarioRegistry=True,
+                includeCohortStudyArtifacts=True,
+                includeStudyAnalytics=True,
+                includeReports=True,
+                includeCanonicalJson=True,
+                includeValidationResults=True,
+                lastPackageSequence=0,
+            )
+            packageResult = logic.assembleReproducibilityPackage(parameterNode, packageConfig)
+            packagePath = Path(packageResult["packagePath"])
+            manifestPath = packagePath / "manifest.json"
+            self.assertTrue(manifestPath.exists())
+            self.assertTrue((packagePath / "schemas").exists())
+            self.assertTrue((packagePath / "benchmarks").exists())
+            self.assertTrue((packagePath / "validation").exists())
+            self.assertTrue((packagePath / "cohorts").exists())
+            self.assertTrue((packagePath / "study_analytics").exists())
+            self.assertTrue((packagePath / "reports").exists())
+            self.assertTrue((packagePath / "exports").exists())
+            self.assertTrue((packagePath / "canonical_json").exists())
+            self.assertGreaterEqual(int(packageResult["artifactCount"]), 2)
+            self.assertGreaterEqual(int(packageResult["warningCount"]), 0)
+            self.assertEqual(Path(packageResult["packagePath"]).name, "Phase12B_0001")
+        finally:
+            for exportedPath in sorted(outputRoot.rglob("*"), reverse=True):
+                if exportedPath.is_file():
+                    exportedPath.unlink()
+                elif exportedPath.is_dir():
+                    exportedPath.rmdir()
+            if outputRoot.exists():
+                outputRoot.rmdir()
+
+    def test_repeated_reproducibility_package_sequence_behavior(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        parameterNode = logic.getParameterNode()
+        outputRoot = Path(tempfile.mkdtemp(prefix="sv3d_repro_sequence_"))
+        try:
+            firstConfig = planner.ReproducibilityPackageConfig(
+                packageMode="ReviewerSupplement",
+                packageBaseName="ReproSeq",
+                outputDirectory=str(outputRoot),
+                includeBenchmarkArtifacts=False,
+                includeScenarioRegistry=False,
+                includeCohortStudyArtifacts=False,
+                includeStudyAnalytics=False,
+                includeReports=False,
+                includeCanonicalJson=False,
+                includeValidationResults=False,
+                lastPackageSequence=0,
+            )
+            firstResult = logic.assembleReproducibilityPackage(parameterNode, firstConfig)
+
+            secondConfig = planner.ReproducibilityPackageConfig(
+                packageMode="ReviewerSupplement",
+                packageBaseName="ReproSeq",
+                outputDirectory=str(outputRoot),
+                includeBenchmarkArtifacts=False,
+                includeScenarioRegistry=False,
+                includeCohortStudyArtifacts=False,
+                includeStudyAnalytics=False,
+                includeReports=False,
+                includeCanonicalJson=False,
+                includeValidationResults=False,
+                lastPackageSequence=int(firstResult["packageSequence"]),
+            )
+            secondResult = logic.assembleReproducibilityPackage(parameterNode, secondConfig)
+
+            self.assertEqual(Path(firstResult["packagePath"]).name, "ReproSeq_0001")
+            self.assertEqual(Path(secondResult["packagePath"]).name, "ReproSeq_0002")
+            self.assertNotEqual(firstResult["packagePath"], secondResult["packagePath"])
+
+            secondManifest = json.loads((Path(secondResult["packagePath"]) / "manifest.json").read_text(encoding="utf-8"))
+            artifactKeys = {str(row.get("artifactKey", "")) for row in secondManifest.get("includedArtifacts", [])}
+            self.assertNotIn("canonical_current_plan_summary", artifactKeys)
+        finally:
+            for exportedPath in sorted(outputRoot.rglob("*"), reverse=True):
+                if exportedPath.is_file():
+                    exportedPath.unlink()
+                elif exportedPath.is_dir():
+                    exportedPath.rmdir()
+            if outputRoot.exists():
+                outputRoot.rmdir()
+
+    def test_reproducibility_preview_tables_are_reused_deterministically(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+
+        summaryTable = logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            planner.REPRODUCIBILITY_PACKAGE_SUMMARY_TABLE_NODE_NAME,
+            planner.GENERATED_REPRODUCIBILITY_PACKAGE_SUMMARY_TABLE_ATTRIBUTE,
+        )
+        manifestPreviewTable = logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            planner.REPRODUCIBILITY_MANIFEST_PREVIEW_TABLE_NODE_NAME,
+            planner.GENERATED_REPRODUCIBILITY_MANIFEST_PREVIEW_TABLE_ATTRIBUTE,
+        )
+        artifactIndexTable = logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            planner.REPRODUCIBILITY_ARTIFACT_INDEX_TABLE_NODE_NAME,
+            planner.GENERATED_REPRODUCIBILITY_ARTIFACT_INDEX_TABLE_ATTRIBUTE,
+        )
+
+        logic.populateReproducibilityPackageSummaryTable(
+            summaryTable,
+            {
+                "PackageMode": "ReviewerSupplement",
+                "PackageBaseName": "SV3D_Repro",
+                "PackagePath": "D:/tmp/SV3D_Repro_0001",
+                "PackageDirectory": "D:/tmp",
+                "ArtifactCount": 5,
+                "WarningCount": 1,
+                "LastPackageStatus": "SuccessWithWarnings",
+                "LastPackageSequence": 1,
+            },
+        )
+        logic.populateReproducibilityManifestPreviewTable(
+            manifestPreviewTable,
+            {
+                "packageId": "SV3D-Repro-0001",
+                "packageTimestampISO": "2026-03-07T12:00:00",
+                "packageSequence": 1,
+                "packageMode": "ReviewerSupplement",
+                "packageBaseName": "SV3D_Repro",
+                "createdByModule": "SurgicalVision3D_Planner",
+                "benchmarkCaseIds": ["CASE001"],
+                "studyIds": ["Study001"],
+                "scenarioIds": ["S001"],
+                "reportIds": [],
+                "warnings": ["missing optional artifact"],
+                "notes": "Synthetic preview",
+            },
+        )
+        logic.populateReproducibilityArtifactIndexTable(
+            artifactIndexTable,
+            [
+                planner.ReproducibilityArtifactEntry(
+                    artifactKey="manifest",
+                    category="schemas",
+                    relativePath="manifest.json",
+                    status="GeneratedJSON",
+                    sourcePath="InSceneSummary",
+                    sizeBytes=120,
+                    sha256="abc",
+                )
+            ],
+        )
+        self.assertEqual(logic.tableNodeRowCount(summaryTable), 8)
+        self.assertEqual(logic.tableNodeRowCount(manifestPreviewTable), 12)
+        self.assertEqual(logic.tableNodeRowCount(artifactIndexTable), 1)
+
+        reusedSummaryTable = logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            planner.REPRODUCIBILITY_PACKAGE_SUMMARY_TABLE_NODE_NAME,
+            planner.GENERATED_REPRODUCIBILITY_PACKAGE_SUMMARY_TABLE_ATTRIBUTE,
+            summaryTable,
+        )
+        reusedManifestPreviewTable = logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            planner.REPRODUCIBILITY_MANIFEST_PREVIEW_TABLE_NODE_NAME,
+            planner.GENERATED_REPRODUCIBILITY_MANIFEST_PREVIEW_TABLE_ATTRIBUTE,
+            manifestPreviewTable,
+        )
+        reusedArtifactIndexTable = logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            planner.REPRODUCIBILITY_ARTIFACT_INDEX_TABLE_NODE_NAME,
+            planner.GENERATED_REPRODUCIBILITY_ARTIFACT_INDEX_TABLE_ATTRIBUTE,
+            artifactIndexTable,
+        )
+        self.assertEqual(reusedSummaryTable.GetID(), summaryTable.GetID())
+        self.assertEqual(reusedManifestPreviewTable.GetID(), manifestPreviewTable.GetID())
+        self.assertEqual(reusedArtifactIndexTable.GetID(), artifactIndexTable.GetID())
 
     def test_recolor_restore_uses_full_array_length(self):
         signedDistances = vtk.vtkDoubleArray()

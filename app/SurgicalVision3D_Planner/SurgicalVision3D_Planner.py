@@ -10,6 +10,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Sequence
+from urllib.parse import unquote
+from xml.etree import ElementTree as ET
 
 import numpy as np
 import vtk
@@ -58,6 +60,12 @@ GENERATED_COHORT_COMPARISON_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.
 GENERATED_REPRODUCIBILITY_PACKAGE_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedReproducibilityPackageSummaryTable"
 GENERATED_REPRODUCIBILITY_MANIFEST_PREVIEW_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedReproducibilityManifestPreviewTable"
 GENERATED_REPRODUCIBILITY_ARTIFACT_INDEX_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedReproducibilityArtifactIndexTable"
+REFERENCE_PROBE_TEMPLATE_ATTRIBUTE = "SurgicalVision3D_Planner.ReferenceProbeTemplate"
+REFERENCE_PROBE_TEMPLATE_SOURCE_PATH_ATTRIBUTE = "SurgicalVision3D_Planner.ReferenceProbeTemplateSourcePath"
+DEFAULT_TUMOR_SEGMENTATION_NAMES = ("Tumor",)
+DEFAULT_ENDPOINTS_MARKUPS_NAMES = ("endpoints", "Endpoints")
+DEFAULT_NATIVE_FIDUCIAL_NAMES = ("Native fiducials", "Native Fiducials", "NativeFiducials")
+DEFAULT_REGISTERED_FIDUCIAL_NAMES = ("Registered fiducials", "Registered Fiducials", "RegisteredFiducials")
 TEMP_PROBE_MARGIN_INPUT_ATTRIBUTE = "SurgicalVision3D_Planner.TempProbeMarginInput"
 TEMP_TUMOR_MARGIN_INPUT_ATTRIBUTE = "SurgicalVision3D_Planner.TempTumorMarginInput"
 TEMP_PROBE_SAFETY_INPUT_ATTRIBUTE = "SurgicalVision3D_Planner.TempProbeSafetyInput"
@@ -92,6 +100,11 @@ REPRODUCIBILITY_ARTIFACT_INDEX_TABLE_NODE_NAME = "SV3D Reproducibility Artifact 
 TEMP_PROBE_SAFETY_MODEL_NODE_NAME = "SV3D Temp Probe Safety Input"
 TEMP_STRUCTURE_SAFETY_MODEL_NODE_NAME = "SV3D Temp Structure Safety Input"
 TEMP_STRUCTURE_SAFETY_DISTANCE_MODEL_NODE_NAME = "SV3D Temp Structure Safety Distance"
+SAMPLE_DATA_CATEGORY = "SurgicalVision3D Planner"
+SAMPLE_DATA_CRLM1001_NAME = "CRLM-1001 Demo Scene"
+SAMPLE_DATA_CRLM1001_RELATIVE_SCENE_PATH = "Resources/Cohorts/CRLM-1001/DemoScene.mrml"
+SAMPLE_DATA_CRLM1001_RELATIVE_THUMBNAIL_PATH = "Resources/Cohorts/CRLM-1001/DemoScene.png"
+SAMPLE_DATA_ALREADY_REGISTERED = False
 
 
 def _normalize_vector(vector: Sequence[float]) -> np.ndarray:
@@ -327,6 +340,66 @@ Phase 1 ablation planning prototype:
         self.parent.acknowledgementText = _("""
 Legacy AblationPlanner workflow was refactored into this module while preserving scripted-module patterns.
 """)
+        try:
+            slicer.app.connect("startupCompleted()", registerSampleData)
+        except Exception:
+            logging.exception("Failed to connect SurgicalVision3D Planner sample-data registration callback.")
+        registerSampleData()
+
+
+def registerSampleData() -> None:
+    global SAMPLE_DATA_ALREADY_REGISTERED
+    if SAMPLE_DATA_ALREADY_REGISTERED:
+        return
+
+    try:
+        import SampleData
+    except Exception:
+        logging.debug("SampleData module is not available yet; deferring bundled sample registration.")
+        return
+
+    moduleDirectory = Path(__file__).resolve().parent
+    demoScenePath = (moduleDirectory / SAMPLE_DATA_CRLM1001_RELATIVE_SCENE_PATH).resolve()
+    demoThumbnailPath = (moduleDirectory / SAMPLE_DATA_CRLM1001_RELATIVE_THUMBNAIL_PATH).resolve()
+    if not demoScenePath.exists():
+        logging.warning("Bundled sample scene was not found: %s", demoScenePath)
+        return
+
+    def loadBundledCrlm1001Scene(source=None, *args, **kwargs):
+        SurgicalVision3D_PlannerLogic.loadBundledSampleScene(demoScenePath)
+        return True
+
+    registrationArguments: dict[str, Any] = {
+        "category": SAMPLE_DATA_CATEGORY,
+        "sampleName": SAMPLE_DATA_CRLM1001_NAME,
+        "fileNames": demoScenePath.name,
+        "uris": demoScenePath.as_uri(),
+        "nodeNames": SAMPLE_DATA_CRLM1001_NAME,
+        "loadFileType": "SceneFile",
+        "loadFiles": True,
+        "customDownloader": loadBundledCrlm1001Scene,
+    }
+    if demoThumbnailPath.exists():
+        registrationArguments["thumbnailFileName"] = str(demoThumbnailPath)
+
+    try:
+        SampleData.SampleDataLogic.registerCustomSampleDataSource(**registrationArguments)
+        SAMPLE_DATA_ALREADY_REGISTERED = True
+    except TypeError:
+        # Fallback for older SampleData APIs that do not accept customDownloader.
+        fallbackArguments: dict[str, Any] = {
+            "category": SAMPLE_DATA_CATEGORY,
+            "sampleName": SAMPLE_DATA_CRLM1001_NAME,
+            "fileNames": demoScenePath.name,
+            "uris": demoScenePath.as_uri(),
+            "nodeNames": SAMPLE_DATA_CRLM1001_NAME,
+            "loadFileType": "SceneFile",
+            "loadFiles": True,
+        }
+        if demoThumbnailPath.exists():
+            fallbackArguments["thumbnailFileName"] = str(demoThumbnailPath)
+        SampleData.SampleDataLogic.registerCustomSampleDataSource(**fallbackArguments)
+        SAMPLE_DATA_ALREADY_REGISTERED = True
 
 
 #
@@ -465,11 +538,26 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             if selector:
                 selector.setMRMLScene(slicer.mrmlScene)
 
+        self._configureNodeSelectorShowHidden(getattr(self.ui, "probeSegmentationSelector", None), True)
+        self._configureNodeSelectorShowHidden(getattr(self.ui, "tumorSegmentationSelector", None), False)
+
         self.logic = SurgicalVision3D_PlannerLogic()
+        self.logic.ensureReferenceProbeTemplatesLoaded()
+        self._populateSampleCaseComboBox()
 
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneStartClose)
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
 
+        if hasattr(self.ui, "loadSampleCaseButton"):
+            self.ui.loadSampleCaseButton.connect("clicked(bool)", self.onLoadSampleCaseButton)
+        if hasattr(self.ui, "sampleCaseComboBox"):
+            self.ui.sampleCaseComboBox.connect("currentIndexChanged(int)", self._updateButtonStates)
+        if hasattr(self.ui, "endpointsMarkupsSelector"):
+            self.ui.endpointsMarkupsSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onEndpointsMarkupsChanged)
+        if hasattr(self.ui, "nativeFiducialsSelector"):
+            self.ui.nativeFiducialsSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onNativeFiducialsChanged)
+        if hasattr(self.ui, "registeredFiducialsSelector"):
+            self.ui.registeredFiducialsSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onRegisteredFiducialsChanged)
         self.ui.placeProbesButton.connect("clicked(bool)", self.onPlaceProbesButton)
         self.ui.createTrajectoryLinesButton.connect("clicked(bool)", self.onCreateTrajectoryLinesButton)
         self.ui.mergeTranslatedProbesButton.connect("clicked(bool)", self.onMergeTranslatedProbesButton)
@@ -505,12 +593,77 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
 
         self.initializeParameterNode()
 
+    @staticmethod
+    def _configureNodeSelectorBaseName(selector, baseName: str) -> None:
+        if not selector:
+            return
+        if hasattr(selector, "setBaseName"):
+            selector.setBaseName(baseName)
+            return
+        if hasattr(selector, "baseName"):
+            selector.baseName = baseName
+
+    def _renameGenericFiducialsNode(self, node, preferredBaseName: str) -> None:
+        if not self.logic or not node or not node.IsA("vtkMRMLMarkupsFiducialNode"):
+            return
+        if self.logic.isGenericDefaultFiducialsNodeName(node.GetName()):
+            node.SetName(slicer.mrmlScene.GenerateUniqueName(preferredBaseName))
+
+    def onEndpointsMarkupsChanged(self, node) -> None:
+        self._renameGenericFiducialsNode(node, "endpoints")
+
+    def onNativeFiducialsChanged(self, node) -> None:
+        self._renameGenericFiducialsNode(node, "NativeFiducials")
+
+    def onRegisteredFiducialsChanged(self, node) -> None:
+        self._renameGenericFiducialsNode(node, "RegisteredFiducials")
+
+    @staticmethod
+    def _configureNodeSelectorShowHidden(selector, showHidden: bool) -> None:
+        if not selector:
+            return
+        if hasattr(selector, "setShowHidden"):
+            selector.setShowHidden(showHidden)
+            return
+        if hasattr(selector, "showHidden"):
+            selector.showHidden = bool(showHidden)
+
+    def _populateSampleCaseComboBox(self) -> None:
+        if not self.logic or not hasattr(self.ui, "sampleCaseComboBox"):
+            return
+
+        sampleCaseComboBox = self.ui.sampleCaseComboBox
+        sampleCaseComboBox.clear()
+        sampleScenes = self.logic.discoverBundledSampleScenes()
+        for sampleSceneName, sampleScenePath in sampleScenes:
+            sampleCaseComboBox.addItem(sampleSceneName, str(sampleScenePath))
+
+        if sampleCaseComboBox.count == 0:
+            sampleCaseComboBox.addItem("No sample scenes found", "")
+            sampleCaseComboBox.enabled = False
+        else:
+            sampleCaseComboBox.enabled = True
+            preferredSampleIndex = sampleCaseComboBox.findText("CRLM-1001")
+            if preferredSampleIndex >= 0:
+                sampleCaseComboBox.currentIndex = preferredSampleIndex
+
+    def _selectedSampleCaseScenePath(self) -> str:
+        if not hasattr(self.ui, "sampleCaseComboBox"):
+            return ""
+        sampleCaseComboBox = self.ui.sampleCaseComboBox
+        if sampleCaseComboBox.count <= 0 or sampleCaseComboBox.currentIndex < 0:
+            return ""
+        return str(sampleCaseComboBox.itemData(sampleCaseComboBox.currentIndex) or "")
+
     def _configureTooltips(self) -> None:
         tooltipsByWidgetName: dict[str, str] = {
+            "sampleCaseComboBox": "Select a bundled sample scene and click Load to open it in the current Slicer session.",
+            "loadSampleCaseButton": "Load the selected bundled sample scene without switching to the Sample Data module.",
             # Core inputs
             "probeSegmentationSelector": (
                 "Select the reference probe/applicator template segmentation. This source geometry is duplicated and "
-                "placed on each trajectory during 'Place Probes'. The template is expected to be oriented along local -Z."
+                "placed on each trajectory during 'Place Probes'. STL templates in Resources/geometries are auto-loaded "
+                "into this selector. The template is expected to be oriented along local -Z."
             ),
             "endpointsMarkupsSelector": (
                 "Select trajectory endpoints as ordered entry/target pairs with an even number of control points: "
@@ -642,7 +795,70 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
     def initializeParameterNode(self) -> None:
         if not self.logic:
             return
-        self.setParameterNode(self.logic.getParameterNode())
+        templateNodes = self.logic.ensureReferenceProbeTemplatesLoaded()
+        parameterNode = self.logic.getParameterNode()
+        self._preloadNamedSceneInputs(parameterNode)
+        resolvedReferenceProbeSegmentation = self.logic.resolveUsableReferenceProbeSegmentation(
+            parameterNode.referenceProbeSegmentation
+        )
+        if resolvedReferenceProbeSegmentation is not parameterNode.referenceProbeSegmentation:
+            parameterNode.referenceProbeSegmentation = resolvedReferenceProbeSegmentation
+        if parameterNode.endpointsMarkups and not slicer.mrmlScene.IsNodePresent(parameterNode.endpointsMarkups):
+            parameterNode.endpointsMarkups = None
+        if parameterNode.referenceProbeSegmentation and not slicer.mrmlScene.IsNodePresent(parameterNode.referenceProbeSegmentation):
+            parameterNode.referenceProbeSegmentation = None
+        if not parameterNode.referenceProbeSegmentation and len(templateNodes) > 0:
+            parameterNode.referenceProbeSegmentation = templateNodes[0]
+        self.setParameterNode(parameterNode)
+
+    def _preloadNamedSceneInputs(self, parameterNode: SurgicalVision3D_PlannerParameterNode) -> None:
+        if not self.logic:
+            return
+
+        if not parameterNode.tumorSegmentation:
+            tumorSegmentation = self.logic.findFirstNodeByClassAndPreferredNames(
+                "vtkMRMLSegmentationNode",
+                DEFAULT_TUMOR_SEGMENTATION_NAMES,
+            )
+            if tumorSegmentation:
+                parameterNode.tumorSegmentation = tumorSegmentation
+
+        endpointMarkups = self.logic.findFirstNodeByClassAndPreferredNames(
+            "vtkMRMLMarkupsFiducialNode",
+            DEFAULT_ENDPOINTS_MARKUPS_NAMES,
+        )
+        if endpointMarkups and (
+            not parameterNode.endpointsMarkups
+            or self.logic.isGenericDefaultFiducialsNodeName(parameterNode.endpointsMarkups.GetName())
+        ):
+            parameterNode.endpointsMarkups = endpointMarkups
+        if not parameterNode.endpointsMarkups:
+            parameterNode.endpointsMarkups = slicer.mrmlScene.AddNewNodeByClass(
+                "vtkMRMLMarkupsFiducialNode",
+                slicer.mrmlScene.GenerateUniqueName("endpoints"),
+            )
+        elif self.logic.isGenericDefaultFiducialsNodeName(parameterNode.endpointsMarkups.GetName()):
+            parameterNode.endpointsMarkups.SetName(slicer.mrmlScene.GenerateUniqueName("endpoints"))
+
+        nativeFiducials = self.logic.findFirstNodeByClassAndPreferredNames(
+            "vtkMRMLMarkupsFiducialNode",
+            DEFAULT_NATIVE_FIDUCIAL_NAMES,
+        )
+        if nativeFiducials and (
+            not parameterNode.nativeFiducials
+            or self.logic.isGenericDefaultFiducialsNodeName(parameterNode.nativeFiducials.GetName())
+        ):
+            parameterNode.nativeFiducials = nativeFiducials
+
+        registeredFiducials = self.logic.findFirstNodeByClassAndPreferredNames(
+            "vtkMRMLMarkupsFiducialNode",
+            DEFAULT_REGISTERED_FIDUCIAL_NAMES,
+        )
+        if registeredFiducials and (
+            not parameterNode.registeredFiducials
+            or self.logic.isGenericDefaultFiducialsNodeName(parameterNode.registeredFiducials.GetName())
+        ):
+            parameterNode.registeredFiducials = registeredFiducials
 
     def setParameterNode(self, inputParameterNode: SurgicalVision3D_PlannerParameterNode | None) -> None:
         if self._parameterNode:
@@ -858,6 +1074,8 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
 
     def _updateButtonStates(self, caller=None, event=None) -> None:
         if not self._parameterNode:
+            if hasattr(self.ui, "loadSampleCaseButton"):
+                self.ui.loadSampleCaseButton.enabled = bool(self._selectedSampleCaseScenePath())
             for buttonName in (
                 "placeProbesButton",
                 "createTrajectoryLinesButton",
@@ -922,8 +1140,22 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         )
         self.ui.exportBundleButton.enabled = bool(exportBaseName.strip()) and (not scenarioRequired or bool(selectedScenarioID.strip()))
         self.ui.runCohortEvaluationButton.enabled = bool(cohortStudyDefinitionPath.strip())
+        if hasattr(self.ui, "loadSampleCaseButton"):
+            self.ui.loadSampleCaseButton.enabled = bool(self._selectedSampleCaseScenePath())
         if hasattr(self.ui, "generateReproducibilityPackageButton"):
             self.ui.generateReproducibilityPackageButton.enabled = bool(packageBaseName.strip())
+
+    def onLoadSampleCaseButton(self) -> None:
+        with slicer.util.tryWithErrorDisplay(_("Failed to load sample case."), waitCursor=True):
+            if not self.logic:
+                raise RuntimeError("Module logic is not initialized.")
+            selectedScenePath = self._selectedSampleCaseScenePath().strip()
+            if not selectedScenePath:
+                raise ValueError("Select a sample case scene before loading.")
+            self.logic.loadBundledSampleScene(selectedScenePath)
+            # Scene load triggers module-scene events, but run one more initialization pass to refresh selectors.
+            self.initializeParameterNode()
+            self._updateButtonStates()
 
     def onPlaceProbesButton(self) -> None:
         with slicer.util.tryWithErrorDisplay(_("Failed to place probes."), waitCursor=True):
@@ -941,6 +1173,13 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 raise ValueError(
                     f"Endpoint markups has {controlPointCount} control points. Add one more point to complete entry/target pairs."
                 )
+            resolvedReferenceProbeSegmentation = self.logic.resolveUsableReferenceProbeSegmentation(
+                self._parameterNode.referenceProbeSegmentation
+            )
+            if not resolvedReferenceProbeSegmentation:
+                raise ValueError("No usable reference probe segmentation is available.")
+            if resolvedReferenceProbeSegmentation is not self._parameterNode.referenceProbeSegmentation:
+                self._parameterNode.referenceProbeSegmentation = resolvedReferenceProbeSegmentation
 
             existingProbeNodeIDs = self.logic.resolveExistingNodeIDs(
                 self.logic.deserializeNodeIDs(self._parameterNode.generatedProbeNodeIDs)
@@ -954,7 +1193,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 self._parameterNode.generatedTrajectoryLineIDs = "[]"
                 existingProbeNodeIDs = []
 
-            generatedProbeNodeIDs = self.logic.placeProbeInstances(self._parameterNode.referenceProbeSegmentation, trajectories)
+            generatedProbeNodeIDs = self.logic.placeProbeInstances(resolvedReferenceProbeSegmentation, trajectories)
             if self._parameterNode.clearPreviousGeneratedProbes:
                 trackedProbeNodeIDs = generatedProbeNodeIDs
             else:
@@ -1613,6 +1852,33 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         return mergedNodeIDs
 
     @staticmethod
+    def _canonicalNodeName(nodeName: str) -> str:
+        return "".join(character for character in str(nodeName).lower() if character.isalnum())
+
+    @staticmethod
+    def isGenericDefaultFiducialsNodeName(nodeName: str) -> bool:
+        loweredName = str(nodeName or "").strip().lower()
+        if loweredName == "f":
+            return True
+        return loweredName.startswith("f_") and loweredName[2:].isdigit()
+
+    def findFirstNodeByClassAndPreferredNames(self, nodeClassName: str, preferredNames: Sequence[str]):
+        normalizedPreferredNames = [
+            self._canonicalNodeName(name)
+            for name in preferredNames
+            if str(name or "").strip()
+        ]
+        if len(normalizedPreferredNames) == 0:
+            return None
+
+        candidateNodes = slicer.util.getNodesByClass(nodeClassName)
+        for preferredName in normalizedPreferredNames:
+            for candidateNode in candidateNodes:
+                if self._canonicalNodeName(candidateNode.GetName()) == preferredName:
+                    return candidateNode
+        return None
+
+    @staticmethod
     def tableNodeRowCount(tableNode: vtkMRMLTableNode | None) -> int:
         if not tableNode or not slicer.mrmlScene.IsNodePresent(tableNode):
             return 0
@@ -1620,6 +1886,15 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         if table is None:
             return 0
         return int(table.GetNumberOfRows())
+
+    @staticmethod
+    def segmentationSegmentCount(segmentationNode: vtkMRMLSegmentationNode | None) -> int:
+        if not segmentationNode or not slicer.mrmlScene.IsNodePresent(segmentationNode):
+            return 0
+        segmentation = segmentationNode.GetSegmentation()
+        if not segmentation:
+            return 0
+        return int(segmentation.GetNumberOfSegments())
 
     @staticmethod
     def sanitizeExportBaseName(exportBaseName: str) -> str:
@@ -1938,6 +2213,317 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
     @staticmethod
     def _resolveResourcePath(relativePath: str) -> Path:
         return (Path(__file__).resolve().parent / relativePath).resolve()
+
+    def discoverBundledSampleScenes(self) -> list[tuple[str, Path]]:
+        cohortResourcesDirectory = self._resolveResourcePath("Resources/Cohorts")
+        if not cohortResourcesDirectory.exists():
+            return []
+
+        bundledScenePaths = sorted(
+            (
+                candidatePath
+                for candidatePath in cohortResourcesDirectory.rglob("*.mrml")
+                if candidatePath.is_file()
+            ),
+            key=lambda candidatePath: (candidatePath.parent.name.lower(), candidatePath.name.lower()),
+        )
+        bundledScenes: list[tuple[str, Path]] = []
+        for scenePath in bundledScenePaths:
+            caseName = scenePath.parent.name.strip() or scenePath.parent.as_posix()
+            sceneStem = scenePath.stem.strip()
+            displayName = caseName if sceneStem.lower() == "demoscene" else f"{caseName} - {sceneStem}"
+            bundledScenes.append((displayName, scenePath))
+        return bundledScenes
+
+    @staticmethod
+    def loadBundledSampleScene(scenePath: str | Path) -> None:
+        resolvedScenePath = Path(scenePath).resolve()
+        if not resolvedScenePath.exists():
+            raise ValueError(f"Sample scene file was not found: {resolvedScenePath}")
+        if resolvedScenePath.suffix.lower() != ".mrml":
+            raise ValueError(f"Unsupported sample scene format: {resolvedScenePath.name}")
+        unresolvedMissingFiles = SurgicalVision3D_PlannerLogic._repairMissingSceneReferences(resolvedScenePath)
+        if len(unresolvedMissingFiles) > 0:
+            formattedMissingFiles = "\n".join(f"- {missingPath}" for missingPath in unresolvedMissingFiles[:12])
+            raise RuntimeError(
+                "Sample scene has missing referenced files that could not be repaired:\n"
+                f"{formattedMissingFiles}"
+            )
+        if slicer.util.loadScene(str(resolvedScenePath), {"clear": True}):
+            return
+
+        logging.warning(
+            "Scene load returned false for '%s'. Falling back to direct asset loading.",
+            resolvedScenePath,
+        )
+        if SurgicalVision3D_PlannerLogic._loadBundledCaseAssetsFromDirectory(resolvedScenePath.parent):
+            return
+        raise RuntimeError(f"Failed to load sample scene: {resolvedScenePath}")
+
+    @staticmethod
+    def _loadBundledCaseAssetsFromDirectory(caseDirectory: Path) -> bool:
+        if not caseDirectory.exists():
+            return False
+
+        slicer.mrmlScene.Clear(0)
+        loadedAny = False
+
+        volumeCandidates = sorted(
+            (
+                candidatePath
+                for candidatePath in caseDirectory.glob("*.nrrd")
+                if candidatePath.is_file() and not candidatePath.name.lower().endswith(".seg.nrrd")
+            ),
+            key=lambda candidatePath: (-int(candidatePath.stat().st_size), candidatePath.name.lower()),
+        )
+        for volumePath in volumeCandidates[:1]:
+            try:
+                loadedAny = bool(slicer.util.loadVolume(str(volumePath))) or loadedAny
+            except Exception:
+                logging.exception("Failed to load fallback sample-case volume: %s", volumePath)
+
+        segmentationCandidates = sorted(
+            (
+                candidatePath
+                for candidatePath in caseDirectory.glob("*.seg.nrrd")
+                if candidatePath.is_file()
+            ),
+            key=lambda candidatePath: candidatePath.name.lower(),
+        )
+        for segmentationPath in segmentationCandidates:
+            try:
+                loadedAny = bool(slicer.util.loadSegmentation(str(segmentationPath))) or loadedAny
+            except Exception:
+                logging.exception("Failed to load fallback sample-case segmentation: %s", segmentationPath)
+
+        SurgicalVision3D_PlannerLogic().ensureReferenceProbeTemplatesLoaded()
+        return loadedAny
+
+    def resolveUsableReferenceProbeSegmentation(
+        self,
+        selectedReferenceProbeSegmentation: vtkMRMLSegmentationNode | None,
+    ) -> vtkMRMLSegmentationNode | None:
+        if selectedReferenceProbeSegmentation and self.segmentationSegmentCount(selectedReferenceProbeSegmentation) > 0:
+            return selectedReferenceProbeSegmentation
+
+        templateNodes = self.ensureReferenceProbeTemplatesLoaded()
+        if len(templateNodes) == 0:
+            return selectedReferenceProbeSegmentation
+
+        if not selectedReferenceProbeSegmentation:
+            for templateNode in templateNodes:
+                if self.segmentationSegmentCount(templateNode) > 0:
+                    return templateNode
+            return None
+
+        selectedSourcePath = selectedReferenceProbeSegmentation.GetAttribute(REFERENCE_PROBE_TEMPLATE_SOURCE_PATH_ATTRIBUTE) or ""
+        normalizedSelectedSourcePath = (
+            self._normalizeFilesystemPath(selectedSourcePath)
+            if selectedSourcePath
+            else ""
+        )
+        selectedName = str(selectedReferenceProbeSegmentation.GetName() or "").strip().lower()
+        for templateNode in templateNodes:
+            if self.segmentationSegmentCount(templateNode) <= 0:
+                continue
+            templateSourcePath = templateNode.GetAttribute(REFERENCE_PROBE_TEMPLATE_SOURCE_PATH_ATTRIBUTE) or ""
+            normalizedTemplateSourcePath = (
+                self._normalizeFilesystemPath(templateSourcePath)
+                if templateSourcePath
+                else ""
+            )
+            if normalizedSelectedSourcePath and normalizedTemplateSourcePath == normalizedSelectedSourcePath:
+                return templateNode
+            if selectedName and str(templateNode.GetName() or "").strip().lower() == selectedName:
+                return templateNode
+
+        return selectedReferenceProbeSegmentation
+
+    @staticmethod
+    def _repairMissingSceneReferences(scenePath: Path) -> list[Path]:
+        referencedFiles = SurgicalVision3D_PlannerLogic._referencedSceneFiles(scenePath)
+        if len(referencedFiles) == 0:
+            return []
+
+        unresolvedMissingFiles: list[Path] = []
+        for referencedFilePath in referencedFiles:
+            if referencedFilePath.exists():
+                continue
+            if SurgicalVision3D_PlannerLogic._tryRepairMissingSegmentationFileFromStl(scenePath, referencedFilePath):
+                continue
+            unresolvedMissingFiles.append(referencedFilePath)
+        return unresolvedMissingFiles
+
+    @staticmethod
+    def _referencedSceneFiles(scenePath: Path) -> list[Path]:
+        try:
+            sceneTree = ET.parse(str(scenePath))
+        except Exception:
+            logging.exception("Failed to parse sample scene for missing-reference preflight: %s", scenePath)
+            return []
+
+        referencedFilePaths: set[Path] = set()
+        for sceneElement in sceneTree.iter():
+            for attributeName, attributeValue in sceneElement.attrib.items():
+                if attributeName != "fileName" and not attributeName.startswith("fileListMember"):
+                    continue
+                decodedPath = str(unquote(attributeValue or "")).strip()
+                if not decodedPath:
+                    continue
+                candidatePath = Path(decodedPath)
+                if not candidatePath.is_absolute():
+                    candidatePath = (scenePath.parent / candidatePath).resolve()
+                else:
+                    candidatePath = candidatePath.resolve()
+                referencedFilePaths.add(candidatePath)
+        return sorted(referencedFilePaths, key=lambda candidatePath: candidatePath.as_posix().lower())
+
+    @staticmethod
+    def _tryRepairMissingSegmentationFileFromStl(scenePath: Path, missingFilePath: Path) -> bool:
+        if not str(missingFilePath.name).lower().endswith(".seg.vtm"):
+            return False
+
+        baseName = missingFilePath.name[:-len(".seg.vtm")]
+        moduleResourcesDirectory = Path(__file__).resolve().parent / "Resources"
+        sceneResourcesDirectory = scenePath.parent.parent.parent if len(scenePath.parents) >= 3 else moduleResourcesDirectory
+        stlCandidates = [
+            (missingFilePath.parent / f"{baseName}.stl").resolve(),
+            (sceneResourcesDirectory / "geometries" / f"{baseName}.stl").resolve(),
+            (moduleResourcesDirectory / "geometries" / f"{baseName}.stl").resolve(),
+        ]
+        uniqueStlCandidates: list[Path] = []
+        seenCandidates: set[str] = set()
+        for stlCandidate in stlCandidates:
+            candidateKey = stlCandidate.as_posix().lower()
+            if candidateKey in seenCandidates:
+                continue
+            seenCandidates.add(candidateKey)
+            uniqueStlCandidates.append(stlCandidate)
+
+        for stlCandidatePath in uniqueStlCandidates:
+            if not stlCandidatePath.exists():
+                continue
+            if SurgicalVision3D_PlannerLogic._buildSegmentationFileFromStl(stlCandidatePath, missingFilePath):
+                logging.info(
+                    "Repaired missing sample-scene segmentation file '%s' using STL '%s'.",
+                    missingFilePath,
+                    stlCandidatePath,
+                )
+                return True
+        return False
+
+    @staticmethod
+    def _buildSegmentationFileFromStl(stlPath: Path, outputSegmentationPath: Path) -> bool:
+        stlReader = vtk.vtkSTLReader()
+        stlReader.SetFileName(str(stlPath))
+        stlReader.Update()
+        stlSurface = stlReader.GetOutput()
+        if not stlSurface or stlSurface.GetNumberOfPoints() <= 0:
+            return False
+
+        closedSurface = vtk.vtkPolyData()
+        closedSurface.DeepCopy(stlSurface)
+        temporarySegmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", stlPath.stem)
+        try:
+            temporarySegmentationNode.CreateDefaultDisplayNodes()
+            segmentID = temporarySegmentationNode.AddSegmentFromClosedSurfaceRepresentation(
+                closedSurface,
+                stlPath.stem,
+                [0.2, 0.8, 1.0],
+            )
+            if not segmentID:
+                return False
+            outputSegmentationPath.parent.mkdir(parents=True, exist_ok=True)
+            return bool(slicer.util.saveNode(temporarySegmentationNode, str(outputSegmentationPath)))
+        finally:
+            if temporarySegmentationNode and slicer.mrmlScene.IsNodePresent(temporarySegmentationNode):
+                slicer.mrmlScene.RemoveNode(temporarySegmentationNode)
+
+    @staticmethod
+    def _normalizeFilesystemPath(pathValue: str | Path) -> str:
+        try:
+            normalizedPath = Path(pathValue).resolve()
+        except Exception:
+            normalizedPath = Path(pathValue)
+        return normalizedPath.as_posix().lower()
+
+    @staticmethod
+    def _referenceProbeTemplateDisplayName(templatePath: Path) -> str:
+        templateName = templatePath.stem.strip()
+        return templateName if templateName else templatePath.name
+
+    @staticmethod
+    def _loadClosedSurfaceFromStl(stlPath: Path) -> vtk.vtkPolyData | None:
+        stlReader = vtk.vtkSTLReader()
+        stlReader.SetFileName(str(stlPath))
+        stlReader.Update()
+        outputSurface = stlReader.GetOutput()
+        if not outputSurface or outputSurface.GetNumberOfPoints() <= 0:
+            return None
+        closedSurface = vtk.vtkPolyData()
+        closedSurface.DeepCopy(outputSurface)
+        return closedSurface
+
+    def discoverReferenceProbeTemplateFiles(self) -> list[Path]:
+        geometriesDirectory = self._resolveResourcePath("Resources/geometries")
+        if not geometriesDirectory.exists():
+            logging.warning("Reference probe template directory was not found: %s", geometriesDirectory)
+            return []
+        return sorted(
+            (
+                candidatePath
+                for candidatePath in geometriesDirectory.iterdir()
+                if candidatePath.is_file() and candidatePath.suffix.lower() == ".stl"
+            ),
+            key=lambda candidatePath: candidatePath.name.lower(),
+        )
+
+    def ensureReferenceProbeTemplatesLoaded(self) -> list[vtkMRMLSegmentationNode]:
+        templatePaths = self.discoverReferenceProbeTemplateFiles()
+        if len(templatePaths) == 0:
+            return []
+
+        existingTemplatesByPath: dict[str, vtkMRMLSegmentationNode] = {}
+        for segmentationNode in slicer.util.getNodesByClass("vtkMRMLSegmentationNode"):
+            sourcePath = segmentationNode.GetAttribute(REFERENCE_PROBE_TEMPLATE_SOURCE_PATH_ATTRIBUTE)
+            if not sourcePath:
+                continue
+            normalizedSourcePath = self._normalizeFilesystemPath(sourcePath)
+            if normalizedSourcePath not in existingTemplatesByPath:
+                existingTemplatesByPath[normalizedSourcePath] = segmentationNode
+
+        loadedTemplates: list[vtkMRMLSegmentationNode] = []
+        for templatePath in templatePaths:
+            normalizedTemplatePath = self._normalizeFilesystemPath(templatePath)
+            existingTemplate = existingTemplatesByPath.get(normalizedTemplatePath)
+            if existingTemplate and slicer.mrmlScene.IsNodePresent(existingTemplate):
+                existingTemplate.SetHideFromEditors(True)
+                loadedTemplates.append(existingTemplate)
+                continue
+
+            closedSurface = self._loadClosedSurfaceFromStl(templatePath)
+            if not closedSurface or closedSurface.GetNumberOfPoints() <= 0:
+                logging.warning("Failed to load reference probe STL template: %s", templatePath)
+                continue
+
+            templateName = self._referenceProbeTemplateDisplayName(templatePath)
+            templateNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", templateName)
+            templateNode.CreateDefaultDisplayNodes()
+            segmentID = templateNode.AddSegmentFromClosedSurfaceRepresentation(closedSurface, templateName, [0.2, 0.8, 1.0])
+            if not segmentID:
+                logging.warning("Failed to import reference probe template geometry into segmentation node: %s", templatePath)
+                slicer.mrmlScene.RemoveNode(templateNode)
+                continue
+
+            templateNode.SetAttribute(REFERENCE_PROBE_TEMPLATE_ATTRIBUTE, "1")
+            templateNode.SetAttribute(REFERENCE_PROBE_TEMPLATE_SOURCE_PATH_ATTRIBUTE, str(templatePath))
+            templateNode.SetHideFromEditors(True)
+            if templateNode.GetDisplayNode():
+                templateNode.GetDisplayNode().SetVisibility(False)
+            loadedTemplates.append(templateNode)
+            existingTemplatesByPath[normalizedTemplatePath] = templateNode
+
+        return loadedTemplates
 
     def collectReproducibilityArtifacts(
         self,
@@ -3375,10 +3961,16 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         referenceProbeSegmentation: vtkMRMLSegmentationNode | None,
         trajectories: Sequence[ProbeTrajectory],
     ) -> list[str]:
+        referenceProbeSegmentation = self.resolveUsableReferenceProbeSegmentation(referenceProbeSegmentation)
         if not referenceProbeSegmentation:
             raise ValueError("Reference probe segmentation is required.")
         if len(trajectories) == 0:
             raise ValueError("No trajectories were provided.")
+        if self.segmentationSegmentCount(referenceProbeSegmentation) <= 0:
+            raise RuntimeError(
+                f"Reference probe segmentation '{referenceProbeSegmentation.GetName()}' has no segments. "
+                "Select a template from 'Reference probe segmentation'."
+            )
 
         self._ensureSegmentationHasClosedSurface(referenceProbeSegmentation)
 

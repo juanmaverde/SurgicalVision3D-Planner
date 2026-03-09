@@ -18,13 +18,38 @@
      </property>
      <layout class="QFormLayout" name="inputsFormLayout">
       <item row="0" column="0">
+       <widget class="QLabel" name="sampleCaseLabel">
+        <property name="text">
+         <string>Sample case:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <layout class="QHBoxLayout" name="sampleCaseLayout">
+        <item>
+         <widget class="QComboBox" name="sampleCaseComboBox">
+          <property name="toolTip">
+           <string>Select a bundled sample scene from Resources/Cohorts.</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="loadSampleCaseButton">
+          <property name="text">
+           <string>Load</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item row="1" column="0">
        <widget class="QLabel" name="probeSegmentationLabel">
         <property name="text">
          <string>Reference probe segmentation:</string>
         </property>
        </widget>
       </item>
-      <item row="0" column="1">
+      <item row="1" column="1">
        <widget class="qMRMLNodeComboBox" name="probeSegmentationSelector">
         <property name="toolTip">
          <string>Probe segmentation template used as geometry source for each trajectory.</string>
@@ -48,14 +73,14 @@
         </property>
        </widget>
       </item>
-      <item row="1" column="0">
+      <item row="2" column="0">
        <widget class="QLabel" name="endpointsMarkupsLabel">
         <property name="text">
          <string>Endpoint markups:</string>
         </property>
        </widget>
       </item>
-      <item row="1" column="1">
+      <item row="2" column="1">
        <widget class="qMRMLNodeComboBox" name="endpointsMarkupsSelector">
         <property name="toolTip">
          <string>Control points are interpreted as entry/target pairs for trajectories.</string>
@@ -82,14 +107,14 @@
         </property>
        </widget>
       </item>
-      <item row="2" column="0">
+      <item row="3" column="0">
        <widget class="QLabel" name="createLinesOnPlacementLabel">
         <property name="text">
          <string>Create trajectory lines on placement:</string>
         </property>
        </widget>
       </item>
-      <item row="2" column="1">
+      <item row="3" column="1">
        <widget class="QCheckBox" name="createTrajectoryLinesOnPlacementCheckBox">
         <property name="text">
          <string/>
@@ -99,14 +124,14 @@
         </property>
        </widget>
       </item>
-      <item row="3" column="0">
+      <item row="4" column="0">
        <widget class="QLabel" name="clearPreviousProbesLabel">
         <property name="text">
          <string>Clear previous translated probes:</string>
         </property>
        </widget>
       </item>
-      <item row="3" column="1">
+      <item row="4" column="1">
        <widget class="QCheckBox" name="clearPreviousGeneratedProbesCheckBox">
         <property name="text">
          <string/>
@@ -116,7 +141,7 @@
         </property>
        </widget>
       </item>
-      <item row="4" column="0" colspan="2">
+      <item row="5" column="0" colspan="2">
        <layout class="QHBoxLayout" name="planningButtonsLayout">
         <item>
          <widget class="QPushButton" name="placeProbesButton">

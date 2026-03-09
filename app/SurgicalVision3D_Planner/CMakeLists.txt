@@ -12,6 +12,11 @@ set(MODULE_PYTHON_RESOURCES
   Resources/Cohorts/cohort_schema_v1.json
   Resources/Cohorts/cohort_catalog_v1.json
   Resources/Cohorts/studies/example_cohort_v1.json
+  Resources/Cohorts/CRLM-1001/DemoScene.mrml
+  Resources/Cohorts/CRLM-1001/DemoScene.png
+  "Resources/Cohorts/CRLM-1001/CRLM-CT-1001 (CRLM-CT-1001).nrrd"
+  "Resources/Cohorts/CRLM-1001/Segmentation-CRLM-CT-1001 (CRLM-CT-1001).seg.nrrd"
+  Resources/Cohorts/CRLM-1001/Tumor.seg.nrrd
   Resources/Reproducibility/reproducibility_package_schema_v1.json
   Resources/Reproducibility/reproducibility_package_layout_v1.json
   Resources/Reproducibility/example_reviewer_package_config_v1.json

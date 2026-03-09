@@ -42,15 +42,19 @@ At a high level, the module supports:
    - `.../SurgicalVision3D-Planner/app`
 3. Restart Slicer or reload modules.
 4. Open module: `SurgicalVision3D Planner`.
-5. In **Inputs**, select:
+5. Optional sample case load (inside this module):
+   - In `Probe Planning Inputs`, use `Sample case` dropdown.
+   - Select `CRLM-1001`.
+   - Click `Load`.
+6. In **Inputs**, select:
    - reference probe segmentation
    - endpoints markups (entry/target pairs)
    - tumor segmentation
-6. Run:
+7. Run:
    - `Place Probes`
    - `Merge Translated Probes`
    - `Evaluate Margins`
-7. Review generated `SV3D ...` tables in the Data module.
+8. Review generated `SV3D ...` tables in the Data module.
 
 ## Key Terms (Plain Language)
 

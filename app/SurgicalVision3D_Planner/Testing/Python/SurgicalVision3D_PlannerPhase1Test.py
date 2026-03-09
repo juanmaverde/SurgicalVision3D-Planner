@@ -26,6 +26,7 @@ class SurgicalVision3D_PlannerPhase1Test(ScriptedLoadableModuleTest):
         self.test_structure_segment_enumeration_handles_multiple_segments()
         self.test_structure_safety_summary_metrics_from_synthetic_values()
         self.test_structure_safety_threshold_metrics_from_synthetic_values()
+        self.test_signed_distance_model_uses_inside_negative_convention()
         self.test_structure_safety_optional_input_returns_empty_outputs()
         self.test_structure_safety_empty_segmentation_guard()
         self.test_empty_segmentation_guard()
@@ -229,6 +230,38 @@ class SurgicalVision3D_PlannerPhase1Test(ScriptedLoadableModuleTest):
         self.assertAlmostEqual(float(summary["PercentBelow5Mm"]), 80.0, places=6)
         self.assertEqual(int(summary["CountAtLeast5Mm"]), 1)
         self.assertAlmostEqual(float(summary["PercentAtLeast5Mm"]), 20.0, places=6)
+
+    def test_signed_distance_model_uses_inside_negative_convention(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+
+        targetModel = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "TargetSphere")
+        targetModel.SetAndObservePolyData(self._createSpherePolyData(radius=3.0))
+        targetModel.CreateDefaultDisplayNodes()
+
+        sourcePoints = vtk.vtkPoints()
+        sourcePoints.InsertNextPoint(0.0, 0.0, 0.0)  # Inside the sphere.
+        sourcePoints.InsertNextPoint(5.0, 0.0, 0.0)  # Outside the sphere.
+
+        sourceVertices = vtk.vtkCellArray()
+        for pointIndex in range(sourcePoints.GetNumberOfPoints()):
+            sourceVertices.InsertNextCell(1)
+            sourceVertices.InsertCellPoint(pointIndex)
+
+        sourcePolyData = vtk.vtkPolyData()
+        sourcePolyData.SetPoints(sourcePoints)
+        sourcePolyData.SetVerts(sourceVertices)
+
+        sourceModel = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "SourcePoints")
+        sourceModel.SetAndObservePolyData(sourcePolyData)
+        sourceModel.CreateDefaultDisplayNodes()
+
+        outputModel = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", "SignedDistanceOutput")
+        logic.computeSignedDistanceModel(sourceModel, targetModel, outputModel)
+
+        signedValues = logic.getSignedMarginValues(outputModel)
+        self.assertEqual(len(signedValues), 2)
+        self.assertLess(float(signedValues[0]), 0.0)
+        self.assertGreater(float(signedValues[1]), 0.0)
 
     def test_structure_safety_optional_input_returns_empty_outputs(self):
         logic = planner.SurgicalVision3D_PlannerLogic()

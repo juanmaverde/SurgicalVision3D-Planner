@@ -9,7 +9,7 @@ set(EXTENSION_CONTRIBUTORS "Juan Verde (Surgeon Scientist)")
 set(EXTENSION_DESCRIPTION "Phase 1 prototype for segmentation-based ablation probe planning and tumor margin evaluation.")
 set(EXTENSION_ICONURL "https://www.example.com/Slicer/Extensions/SurgicalVision3D_Planner.png")
 set(EXTENSION_SCREENSHOTURLS "https://www.example.com/Slicer/Extensions/SurgicalVision3D_Planner/Screenshots/1.png")
-set(EXTENSION_DEPENDS "ModelToModelDistance") # Specified as a list or "NA" if no dependencies
+set(EXTENSION_DEPENDS "NA") # Specified as a list or "NA" if no dependencies
 
 #-----------------------------------------------------------------------------
 # Extension dependencies

@@ -31,6 +31,7 @@ At a high level, the module supports:
 - Python entry point: `app/SurgicalVision3D_Planner/SurgicalVision3D_Planner.py`
 - Qt UI file: `app/SurgicalVision3D_Planner/Resources/UI/SurgicalVision3D_Planner.ui`
 - Tests: `app/SurgicalVision3D_Planner/Testing/Python/SurgicalVision3D_PlannerPhase1Test.py`
+- Prerequisites: `app/SurgicalVision3D_Planner/PREREQUISITES.md`
 - Phase notes: `app/SurgicalVision3D_Planner/PHASE1_REFACTOR_NOTES.md`
 - End-user guide: `app/SurgicalVision3D_Planner/USAGE_GUIDE.md`
 

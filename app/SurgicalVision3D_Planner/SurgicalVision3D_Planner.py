@@ -315,14 +315,14 @@ class SurgicalVision3D_Planner(ScriptedLoadableModule):
         ScriptedLoadableModule.__init__(self, parent)
         self.parent.title = _("SurgicalVision3D Planner")
         self.parent.categories = [translate("qSlicerAbstractCoreModule", "Quantification")]
-        self.parent.dependencies = ["ModelToModelDistance", "SegmentEditor", "FiducialRegistration"]
+        self.parent.dependencies = ["SegmentEditor", "FiducialRegistration"]
         self.parent.contributors = ["Juan Verde (Surgeon Scientist)"]
         self.parent.helpText = _("""
 Phase 1 ablation planning prototype:
 1. Generate trajectories from endpoint control-point pairs.
 2. Place translated probe segmentations along trajectories.
 3. Merge translated probes into one ablation zone.
-4. Evaluate tumor-vs-ablation signed margins using ModelToModelDistance.
+4. Evaluate tumor-vs-ablation signed margins using signed closest-point distances.
 """)
         self.parent.acknowledgementText = _("""
 Legacy AblationPlanner workflow was refactored into this module while preserving scripted-module patterns.
@@ -3568,8 +3568,6 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             raise ValueError("Tumor segmentation node is required.")
         if not probeSegmentation:
             raise ValueError("Combined probe segmentation node is required.")
-        if not hasattr(slicer.modules, "modeltomodeldistance"):
-            raise RuntimeError("ModelToModelDistance module is not available.")
 
         tempProbeModel = self.createOrReuseOwnedOutputNode(
             "vtkMRMLModelNode",
@@ -3602,15 +3600,7 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         marginModel.CreateDefaultDisplayNodes()
 
         try:
-            distanceParameters = {
-                "vtkFile1": tumorModel.GetID(),
-                "vtkFile2": probeModel.GetID(),
-                "distanceType": "signed_closest_point",
-                "vtkOutput": marginModel.GetID(),
-            }
-            cliNode = slicer.cli.runSync(slicer.modules.modeltomodeldistance, None, distanceParameters)
-            if cliNode:
-                slicer.mrmlScene.RemoveNode(cliNode)
+            self.computeSignedDistanceModel(tumorModel, probeModel, marginModel)
 
             signedDistanceArray = self.getSignedDistanceArray(marginModel)
             self.backupSignedDistanceArray(marginModel, signedDistanceArray)
@@ -3639,8 +3629,6 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             return [], []
         if not probeSegmentation:
             raise ValueError("Combined probe segmentation node is required for structure safety evaluation.")
-        if not hasattr(slicer.modules, "modeltomodeldistance"):
-            raise RuntimeError("ModelToModelDistance module is not available.")
 
         riskSegments = self.getValidSegmentationSegments(
             riskStructuresSegmentation,
@@ -3681,17 +3669,8 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
                     outputModelNode=tempStructureModel,
                 )
 
-                # Signed convention from ModelToModelDistance:
-                # negative values indicate structure points inside/overlapping ablation geometry.
-                distanceParameters = {
-                    "vtkFile1": tempStructureModel.GetID(),
-                    "vtkFile2": probeModel.GetID(),
-                    "distanceType": "signed_closest_point",
-                    "vtkOutput": tempDistanceModel.GetID(),
-                }
-                cliNode = slicer.cli.runSync(slicer.modules.modeltomodeldistance, None, distanceParameters)
-                if cliNode:
-                    slicer.mrmlScene.RemoveNode(cliNode)
+                # Negative values indicate structure points inside/overlapping ablation geometry.
+                self.computeSignedDistanceModel(tempStructureModel, probeModel, tempDistanceModel)
 
                 signedDistanceValues = self.getSignedMarginValues(tempDistanceModel)
                 distanceSummary = self.computeDistanceSummary(signedDistanceValues)
@@ -4600,6 +4579,59 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             modelName,
             outputModelNode=outputModelNode,
         )
+
+    @staticmethod
+    def _requireModelPolyData(modelNode: vtkMRMLModelNode, modelRole: str) -> vtk.vtkPolyData:
+        mesh = modelNode.GetMesh()
+        polyData = vtk.vtkPolyData.SafeDownCast(mesh)
+        if polyData is None or polyData.GetNumberOfPoints() <= 0:
+            raise RuntimeError(f"{modelRole} model '{modelNode.GetName()}' has no valid polydata points.")
+        return polyData
+
+    def computeSignedDistanceModel(
+        self,
+        sourceModelNode: vtkMRMLModelNode,
+        targetModelNode: vtkMRMLModelNode,
+        outputModelNode: vtkMRMLModelNode,
+    ) -> vtkMRMLModelNode:
+        sourcePolyData = self._requireModelPolyData(sourceModelNode, "Source")
+        targetPolyData = self._requireModelPolyData(targetModelNode, "Target")
+
+        outputPolyData = vtk.vtkPolyData()
+        outputPolyData.DeepCopy(sourcePolyData)
+
+        implicitDistance = vtk.vtkImplicitPolyDataDistance()
+        implicitDistance.SetInput(targetPolyData)
+
+        enclosedFilter = vtk.vtkSelectEnclosedPoints()
+        enclosedFilter.SetInputData(outputPolyData)
+        enclosedFilter.SetSurfaceData(targetPolyData)
+        enclosedFilter.SetTolerance(1e-6)
+        enclosedFilter.CheckSurfaceOff()
+        enclosedFilter.Update()
+
+        pointCount = outputPolyData.GetNumberOfPoints()
+        signedDistanceArray = vtk.vtkDoubleArray()
+        signedDistanceArray.SetName(SIGNED_DISTANCE_ARRAY_NAME)
+        signedDistanceArray.SetNumberOfComponents(1)
+        signedDistanceArray.SetNumberOfTuples(pointCount)
+
+        pointCoordinates = [0.0, 0.0, 0.0]
+        for pointIndex in range(pointCount):
+            outputPolyData.GetPoint(pointIndex, pointCoordinates)
+            unsignedDistance = abs(float(implicitDistance.EvaluateFunction(pointCoordinates)))
+            signedDistance = -unsignedDistance if bool(enclosedFilter.IsInside(pointIndex)) else unsignedDistance
+            signedDistanceArray.SetValue(pointIndex, signedDistance)
+
+        pointData = outputPolyData.GetPointData()
+        if pointData.GetArray(SIGNED_DISTANCE_ARRAY_NAME):
+            pointData.RemoveArray(SIGNED_DISTANCE_ARRAY_NAME)
+        pointData.AddArray(signedDistanceArray)
+        pointData.SetActiveScalars(SIGNED_DISTANCE_ARRAY_NAME)
+
+        outputModelNode.SetAndObservePolyData(outputPolyData)
+        outputModelNode.CreateDefaultDisplayNodes()
+        return outputModelNode
 
     def getModelFieldData(self, modelNode: vtkMRMLModelNode) -> vtk.vtkFieldData:
         mesh = modelNode.GetMesh()

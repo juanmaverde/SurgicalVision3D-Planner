@@ -148,7 +148,7 @@ AUTO_ADJUST_AZIMUTH_SAMPLE_COUNT = 36
 DEFAULT_CT_ABDOMEN_WINDOW = 350.0
 DEFAULT_CT_ABDOMEN_LEVEL = 40.0
 EVALUATE_DERIVED_BUNDLE_INLINE_ON_PLACEMENT = False
-USE_SEGMENT_EDITOR_UNION_FOR_PROBE_MERGE = False
+USE_SEGMENT_EDITOR_UNION_FOR_PROBE_MERGE = True
 # Guard rail: VTK distance fast path can hard-crash on malformed surfaces in some scenes.
 # Keep disabled by default and enable only after validating scene geometry stability.
 ENABLE_VTK_DISTANCE_FAST_PATH = False
@@ -395,6 +395,8 @@ class LockedMasterPlanSnapshot:
     tumorSegmentID: str = ""
     tumorSegmentName: str = ""
     endpointsMarkupsID: str = ""
+    firstDroppedPointRAS: tuple[float, float, float] | None = None
+    secondDroppedPointRAS: tuple[float, float, float] | None = None
 
 
 @dataclass
@@ -3690,6 +3692,15 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 DEFAULT_TUMOR_SEGMENT_NAMES,
                 "locked master plan snapshot",
             )
+            firstDroppedPointRAS = None
+            secondDroppedPointRAS = None
+            if self._parameterNode.endpointsMarkups and int(self._parameterNode.endpointsMarkups.GetNumberOfControlPoints()) >= 2:
+                firstPoint = [0.0, 0.0, 0.0]
+                secondPoint = [0.0, 0.0, 0.0]
+                self._parameterNode.endpointsMarkups.GetNthControlPointPosition(0, firstPoint)
+                self._parameterNode.endpointsMarkups.GetNthControlPointPosition(1, secondPoint)
+                firstDroppedPointRAS = tuple(float(value) for value in firstPoint)
+                secondDroppedPointRAS = tuple(float(value) for value in secondPoint)
             snapshot = LockedMasterPlanSnapshot(
                 geometryId=geometryEntry.geometryId,
                 geometryDisplayName=geometryEntry.displayName,
@@ -3706,6 +3717,8 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 tumorSegmentID=tumorSegmentID,
                 tumorSegmentName=tumorSegmentName,
                 endpointsMarkupsID=self._parameterNode.endpointsMarkups.GetID() if self._parameterNode.endpointsMarkups else "",
+                firstDroppedPointRAS=firstDroppedPointRAS,
+                secondDroppedPointRAS=secondDroppedPointRAS,
             )
             snapshotTable = self.logic.createOrReuseOwnedOutputNode(
                 "vtkMRMLTableNode",
@@ -3767,11 +3780,54 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                     geometryActiveElementLengthMm,
                     activeElementLengthMm,
                 )
+            snapshotEntryPointRAS = tuple(float(value) for value in snapshotValues.get("entryPointRAS", (0.0, 0.0, 0.0)))
+            snapshotTargetPointRAS = tuple(float(value) for value in snapshotValues.get("targetPointRAS", (0.0, 0.0, 0.0)))
+
+            def _snapshotRasPoint(values: Any) -> tuple[float, float, float] | None:
+                if not isinstance(values, (list, tuple)) or len(values) < 3:
+                    return None
+                try:
+                    point = tuple(float(values[index]) for index in range(3))
+                except Exception:
+                    return None
+                return point if np.all(np.isfinite(np.asarray(point, dtype=float))) else None
+
+            firstDroppedPointRAS = _snapshotRasPoint(snapshotValues.get("firstDroppedPointRAS"))
+            secondDroppedPointRAS = _snapshotRasPoint(snapshotValues.get("secondDroppedPointRAS"))
+            if not firstDroppedPointRAS or not secondDroppedPointRAS:
+                endpointsMarkupsID = str(snapshotValues.get("endpointsMarkupsID", "")).strip()
+                endpointsMarkupsNode = slicer.mrmlScene.GetNodeByID(endpointsMarkupsID) if endpointsMarkupsID else None
+                if (
+                    endpointsMarkupsNode
+                    and endpointsMarkupsNode.IsA("vtkMRMLMarkupsFiducialNode")
+                    and int(endpointsMarkupsNode.GetNumberOfControlPoints()) >= 2
+                ):
+                    firstPoint = [0.0, 0.0, 0.0]
+                    secondPoint = [0.0, 0.0, 0.0]
+                    endpointsMarkupsNode.GetNthControlPointPosition(0, firstPoint)
+                    endpointsMarkupsNode.GetNthControlPointPosition(1, secondPoint)
+                    firstDroppedPointRAS = tuple(float(value) for value in firstPoint)
+                    secondDroppedPointRAS = tuple(float(value) for value in secondPoint)
+
+            # Coaxial distances are anchored to markups drop order: first point is applicator endpoint, second is entry.
+            coaxialEntryPointRAS = snapshotEntryPointRAS
+            coaxialTargetPointRAS = snapshotTargetPointRAS
+            if firstDroppedPointRAS and secondDroppedPointRAS:
+                coaxialTargetPointRAS = firstDroppedPointRAS
+                coaxialEntryPointRAS = secondDroppedPointRAS
+
+            coaxialDirectionVector = np.asarray(coaxialTargetPointRAS, dtype=float) - np.asarray(coaxialEntryPointRAS, dtype=float)
+            coaxialTrajectoryLengthMm = float(np.linalg.norm(coaxialDirectionVector))
+            if not math.isfinite(coaxialTrajectoryLengthMm) or coaxialTrajectoryLengthMm <= 1e-8:
+                coaxialDirectionValues = tuple(float(value) for value in snapshotValues.get("directionVector", (0.0, 0.0, -1.0)))
+                coaxialTrajectoryLengthMm = float(snapshotValues.get("trajectoryLengthMm", 0.0))
+            else:
+                coaxialDirectionValues = tuple((coaxialDirectionVector / coaxialTrajectoryLengthMm).tolist())
             snapshotTrajectory = ProbeTrajectory(
-                entryPointRAS=tuple(float(value) for value in snapshotValues.get("entryPointRAS", (0.0, 0.0, 0.0))),
-                targetPointRAS=tuple(float(value) for value in snapshotValues.get("targetPointRAS", (0.0, 0.0, 0.0))),
-                directionVector=tuple(float(value) for value in snapshotValues.get("directionVector", (0.0, 0.0, -1.0))),
-                lengthMm=float(snapshotValues.get("trajectoryLengthMm", 0.0)),
+                entryPointRAS=coaxialEntryPointRAS,
+                targetPointRAS=coaxialTargetPointRAS,
+                directionVector=coaxialDirectionValues,
+                lengthMm=float(coaxialTrajectoryLengthMm),
                 trajectoryIndex=0,
                 label="Master",
                 role="Master",
@@ -8299,8 +8355,7 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         combinedSegmentation.CreateDefaultDisplayNodes()
         self._ensureSegmentationReferenceImageGeometry(combinedSegmentation)
         self._clearSegmentationSegments(combinedSegmentation)
-        appendFilter = vtk.vtkAppendPolyData()
-        appendedSurfaceCount = 0
+        probeSurfaces: list[vtk.vtkPolyData] = []
         for translatedProbeNode in validProbeNodes:
             self._ensureSegmentationHasClosedSurface(translatedProbeNode)
             sourceSegmentID = self.getWorkingSegmentID(
@@ -8317,31 +8372,62 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
                 continue
             surfaceCopy = vtk.vtkPolyData()
             surfaceCopy.DeepCopy(closedSurface)
-            appendFilter.AddInputData(surfaceCopy)
-            appendedSurfaceCount += 1
+            probeSurfaces.append(surfaceCopy)
 
-        if appendedSurfaceCount <= 0:
+        if len(probeSurfaces) <= 0:
             raise RuntimeError("Unable to build combined ablation segmentation from generated probes.")
 
-        appendFilter.Update()
-        cleanFilter = vtk.vtkCleanPolyData()
-        cleanFilter.SetInputConnection(appendFilter.GetOutputPort())
-        cleanFilter.Update()
+        if USE_SEGMENT_EDITOR_UNION_FOR_PROBE_MERGE:
+            for surfaceIndex, surface in enumerate(probeSurfaces):
+                combinedSegmentation.AddSegmentFromClosedSurfaceRepresentation(
+                    surface,
+                    f"Probe_{surfaceIndex + 1:02d}",
+                    [1.0, 0.3, 0.1],
+                )
+            try:
+                self._unionSegmentsWithLogicalOperators(combinedSegmentation)
+            except Exception:
+                logging.exception(
+                    "Segment Editor union probe merge failed; falling back to closed-surface append merge."
+                )
+                self._mergeSegmentsByAppendingSurfaces(combinedSegmentation)
+        else:
+            appendFilter = vtk.vtkAppendPolyData()
+            for surface in probeSurfaces:
+                appendFilter.AddInputData(surface)
+            appendFilter.Update()
 
-        mergedSurface = vtk.vtkPolyData()
-        mergedSurface.DeepCopy(cleanFilter.GetOutput())
-        if (
-            mergedSurface.GetNumberOfPoints() <= 0
-            or mergedSurface.GetNumberOfCells() <= 0
-            or not self._polyDataHasFinitePoints(mergedSurface)
-        ):
-            raise RuntimeError("Probe merge produced an invalid combined closed surface.")
+            cleanFilter = vtk.vtkCleanPolyData()
+            cleanFilter.SetInputConnection(appendFilter.GetOutputPort())
+            cleanFilter.Update()
 
-        combinedSegmentation.AddSegmentFromClosedSurfaceRepresentation(
-            mergedSurface,
-            "CombinedAblationZone",
-            [1.0, 0.3, 0.1],
-        )
+            mergedSurface = vtk.vtkPolyData()
+            mergedSurface.DeepCopy(cleanFilter.GetOutput())
+            if (
+                mergedSurface.GetNumberOfPoints() <= 0
+                or mergedSurface.GetNumberOfCells() <= 0
+                or not self._polyDataHasFinitePoints(mergedSurface)
+            ):
+                raise RuntimeError("Probe merge produced an invalid combined closed surface.")
+
+            combinedSegmentation.AddSegmentFromClosedSurfaceRepresentation(
+                mergedSurface,
+                "CombinedAblationZone",
+                [1.0, 0.3, 0.1],
+            )
+
+        if combinedSegmentation.GetSegmentation().GetNumberOfSegments() > 1:
+            self._mergeSegmentsByAppendingSurfaces(combinedSegmentation)
+
+        if combinedSegmentation.GetSegmentation().GetNumberOfSegments() == 1:
+            combinedSegmentID = combinedSegmentation.GetSegmentation().GetNthSegmentID(0)
+            combinedSegment = (
+                combinedSegmentation.GetSegmentation().GetSegment(combinedSegmentID)
+                if combinedSegmentID
+                else None
+            )
+            if combinedSegment:
+                combinedSegment.SetName("CombinedAblationZone")
 
         combinedSegmentation.GetSegmentation().CreateRepresentation("Closed surface")
         if combinedSegmentation.GetSegmentation().GetNumberOfSegments() != 1:

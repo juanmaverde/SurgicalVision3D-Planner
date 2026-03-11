@@ -22,6 +22,8 @@ class SurgicalVision3D_PlannerPhase1Test(ScriptedLoadableModuleTest):
         self.test_trajectory_extraction_and_odd_point_handling()
         self.test_trajectory_extraction_rejects_non_finite_points()
         self.test_trajectory_metrics_from_known_point_pairs()
+        self.test_geometry_catalog_template_paths_exist()
+        self.test_bundled_demo_case_resources_exist()
         self.test_trajectory_geometry_validation_for_placement()
         self.test_signed_margin_summary_metrics_from_synthetic_values()
         self.test_margin_threshold_summary_metrics()
@@ -179,6 +181,36 @@ class SurgicalVision3D_PlannerPhase1Test(ScriptedLoadableModuleTest):
         self.assertEqual(int(metrics[1]["TrajectoryIndex"]), 2)
         self.assertAlmostEqual(float(metrics[1]["LengthMm"]), 5.0, places=6)
         self.assertAlmostEqual(float(metrics[1]["DirS"]), -1.0, places=6)
+
+    def test_geometry_catalog_template_paths_exist(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        geometryEntries = logic.loadGeometryCatalog()
+        self.assertGreater(len(geometryEntries), 0)
+
+        for geometryEntry in geometryEntries:
+            templatePath = logic._resolveResourcePath(geometryEntry.templateRelativePath)
+            self.assertTrue(templatePath.exists(), f"Missing bundled geometry template: {templatePath}")
+
+    def test_bundled_demo_case_resources_exist(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        scenePath = logic._resolveResourcePath(planner.SAMPLE_DATA_CRLM1001_RELATIVE_SCENE_PATH)
+        thumbnailPath = logic._resolveResourcePath(planner.SAMPLE_DATA_CRLM1001_RELATIVE_THUMBNAIL_PATH)
+
+        self.assertTrue(scenePath.exists(), f"Missing bundled demo scene: {scenePath}")
+        self.assertTrue(thumbnailPath.exists(), f"Missing bundled demo thumbnail: {thumbnailPath}")
+
+        caseDirectory = scenePath.parent
+        for requiredName in (
+            "CRLM-CT-1001 (CRLM-CT-1001).nrrd",
+            "Critical Structures.seg.nrrd",
+            "Tumor.seg.nrrd",
+            "endpoints.mrk.json",
+            "NativeFiducials.mrk.json",
+            "RegisteredFiducials.mrk.json",
+            "Isodose_ColorTable_DefaultCopy.csv",
+        ):
+            requiredPath = caseDirectory / requiredName
+            self.assertTrue(requiredPath.exists(), f"Missing bundled demo-case resource: {requiredPath}")
 
     def test_signed_margin_summary_metrics_from_synthetic_values(self):
         logic = planner.SurgicalVision3D_PlannerLogic()
@@ -1029,7 +1061,14 @@ class SurgicalVision3D_PlannerPhase1Test(ScriptedLoadableModuleTest):
             bundlePath = Path(exportResult["bundlePath"])
             self.assertTrue((bundlePath / "manifest.json").exists())
             self.assertTrue((bundlePath / "plan_summary.json").exists())
+            self.assertTrue((bundlePath / "metrics" / "plan_metrics_snapshot.json").exists())
+            self.assertTrue((bundlePath / "tables" / "plan_metrics_snapshot.csv").exists())
+            self.assertTrue((bundlePath / "screenshots" / "capture_manifest.json").exists())
+            self.assertTrue((bundlePath / "scene" / "scene_manifest.json").exists())
+            self.assertTrue((bundlePath / "scene" / "scene_node_inventory.json").exists())
             self.assertGreaterEqual(int(exportResult["fileCount"]), 2)
+            self.assertIn(str(exportResult["status"]), ("Success", "SuccessWithWarnings"))
+            self.assertIn("warningCount", exportResult)
         finally:
             for exportedPath in sorted(exportRoot.rglob("*"), reverse=True):
                 if exportedPath.is_file():

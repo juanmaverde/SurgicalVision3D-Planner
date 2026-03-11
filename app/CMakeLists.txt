@@ -4,11 +4,12 @@ project(SurgicalVision3D_Planner)
 
 #-----------------------------------------------------------------------------
 # Extension meta-information
-set(EXTENSION_HOMEPAGE "https://www.slicer.org/wiki/Documentation/Nightly/Extensions/SurgicalVision3D_Planner")
+set(EXTENSION_HOMEPAGE "https://surgicalvision3d.com/en")
 set(EXTENSION_CONTRIBUTORS "Juan Verde (Surgeon Scientist)")
-set(EXTENSION_DESCRIPTION "Phase 1 prototype for segmentation-based ablation probe planning and tumor margin evaluation.")
-set(EXTENSION_ICONURL "https://www.example.com/Slicer/Extensions/SurgicalVision3D_Planner.png")
-set(EXTENSION_SCREENSHOTURLS "https://www.example.com/Slicer/Extensions/SurgicalVision3D_Planner/Screenshots/1.png")
+set(EXTENSION_DESCRIPTION "Research-oriented 3D Slicer extension for ablation planning, beginner-guided master-trajectory workflows, geometric margin/safety analysis, and deterministic export/reproducibility packages.")
+# Replace these with public image URLs before publishing through the Slicer Extensions Index.
+set(EXTENSION_ICONURL "https://surgicalvision3d.com/en")
+set(EXTENSION_SCREENSHOTURLS "https://surgicalvision3d.com/en")
 set(EXTENSION_DEPENDS "NA") # Specified as a list or "NA" if no dependencies
 
 #-----------------------------------------------------------------------------

@@ -2,85 +2,91 @@
   {
     "id": "emprint_75w_5m",
     "label": "Emprint 75W / 5 min",
-    "templateFile": "Resources/geometries/01_emprint-75w_5m.stl",
+    "templateFile": "Resources/Geometries/01_emprint-75w_5m.stl",
     "activeElementLengthMm": 30.0
   },
   {
     "id": "emprint_75w_7_5m",
     "label": "Emprint 75W / 7.5 min",
-    "templateFile": "Resources/geometries/02_emprint-75w_7-5m.stl",
+    "templateFile": "Resources/Geometries/02_emprint-75w_7-5m.stl",
     "activeElementLengthMm": 30.0
   },
   {
     "id": "emprint_100w_5m",
     "label": "Emprint 100W / 5 min",
-    "templateFile": "Resources/geometries/03_emprint-100w_5m.stl",
+    "templateFile": "Resources/Geometries/03_emprint-100w_5m.stl",
     "activeElementLengthMm": 30.0
   },
   {
     "id": "emprint_100w_7_5m",
     "label": "Emprint 100W / 7.5 min",
-    "templateFile": "Resources/geometries/04_emprint-100w_7-5m.stl",
+    "templateFile": "Resources/Geometries/04_emprint-100w_7-5m.stl",
     "activeElementLengthMm": 30.0
   },
   {
     "id": "emprint_100w_10m",
     "label": "Emprint 100W / 10 min",
-    "templateFile": "Resources/geometries/05_emprint-100w_10m.stl",
+    "templateFile": "Resources/Geometries/05_emprint-100w_10m.stl",
     "activeElementLengthMm": 30.0
   },
   {
     "id": "emprint_150w_6_5m",
     "label": "Emprint 150W / 6.5 min",
-    "templateFile": "Resources/geometries/06_emprint-150w_6-5m.stl",
+    "templateFile": "Resources/Geometries/06_emprint-150w_6-5m.stl",
     "activeElementLengthMm": 30.0
   },
   {
     "id": "emprint_150w_8m",
     "label": "Emprint 150W / 8 min",
-    "templateFile": "Resources/geometries/07_emprint-150w_8m.stl",
+    "templateFile": "Resources/Geometries/07_emprint-150w_8m.stl",
     "activeElementLengthMm": 30.0
   },
   {
     "id": "emprint_150w_10m",
     "label": "Emprint 150W / 10 min",
-    "templateFile": "Resources/geometries/08_emprint-150w_10m.stl",
+    "templateFile": "Resources/Geometries/08_emprint-150w_10m.stl",
     "activeElementLengthMm": 30.0
   },
   {
     "id": "cooltip_single_2cm_ic_exvivo",
     "label": "Cool-tip single 2 cm tip (IC, ex vivo)",
-    "templateFile": "Resources/geometries/09_cooltip-single-2cm-ic_exvivo.stl",
-    "activeElementLengthMm": 20.0
+    "templateFile": "Resources/Geometries/09_cooltip-single-2cm-ic_exvivo.stl",
+    "activeElementLengthMm": 20.0,
+    "axialPlacementOffsetMm": 9.0
   },
   {
     "id": "cooltip_single_2cm_ic_invivo",
     "label": "Cool-tip single 2 cm tip (IC, in vivo)",
-    "templateFile": "Resources/geometries/10_cooltip-single-2cm-ic_invivo.stl",
-    "activeElementLengthMm": 20.0
+    "templateFile": "Resources/Geometries/10_cooltip-single-2cm-ic_invivo.stl",
+    "activeElementLengthMm": 20.0,
+    "axialPlacementOffsetMm": 7.1
   },
   {
     "id": "cooltip_single_3cm_ic_exvivo",
     "label": "Cool-tip single 3 cm tip (IC, ex vivo)",
-    "templateFile": "Resources/geometries/11_cooltip-single-3cm-ic_exvivo.stl",
-    "activeElementLengthMm": 30.0
+    "templateFile": "Resources/Geometries/11_cooltip-single-3cm-ic_exvivo.stl",
+    "activeElementLengthMm": 30.0,
+    "axialPlacementOffsetMm": 14.5
   },
   {
     "id": "cooltip_single_3cm_ic_invivo",
     "label": "Cool-tip single 3 cm tip (IC, in vivo)",
-    "templateFile": "Resources/geometries/12_cooltip-single-3cm-ic_invivo.stl",
-    "activeElementLengthMm": 30.0
+    "templateFile": "Resources/Geometries/12_cooltip-single-3cm-ic_invivo.stl",
+    "activeElementLengthMm": 30.0,
+    "axialPlacementOffsetMm": 12.4
   },
   {
     "id": "cooltip_cluster_2_5cm_nominal",
     "label": "Cool-tip cluster 2.5 cm tip (nominal 4.5 cm zone)",
-    "templateFile": "Resources/geometries/13_cooltip-cluster-2_5cm_nominal.stl",
-    "activeElementLengthMm": 25.0
+    "templateFile": "Resources/Geometries/13_cooltip-cluster-2_5cm_nominal.stl",
+    "activeElementLengthMm": 25.0,
+    "axialPlacementOffsetMm": 16.5
   },
   {
     "id": "cooltip_multi3_3cm_switched_invivo",
     "label": "Cool-tip 3-electrode switched 3 cm (in vivo)",
-    "templateFile": "Resources/geometries/14_cooltip-multi3-3cm-switched_invivo.stl",
-    "activeElementLengthMm": 30.0
+    "templateFile": "Resources/Geometries/14_cooltip-multi3-3cm-switched_invivo.stl",
+    "activeElementLengthMm": 30.0,
+    "axialPlacementOffsetMm": 15.6
   }
 ]

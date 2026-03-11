@@ -62,7 +62,7 @@ Key beginner behaviors:
 Deferred features in this branch:
 
 - multi-applicator planning
-- cohort, reproducibility, export, and git dashboard workflows in the visible beginner path
+- cohort, reproducibility, and git dashboard workflows in the visible beginner path
 
 Quick start in beginner mode:
 
@@ -72,6 +72,7 @@ Quick start in beginner mode:
 4. Validate the trajectory against critical structures. If it fails, click `Auto-adjust Endpoint` to run the conservative 15 mm rescue search.
 5. Select geometry, place the applicator, create the ablation volume, and run `Evaluate MAM`.
 6. If MAM passes, lock the master plan, set `Spare (mm)` if needed (default `5`), and compute the coaxial plan.
+7. Export the planning package (data tables, metrics snapshot, screenshots, and scene bundle).
 
 ## 2. Terminology (Non-Expert + Technical)
 

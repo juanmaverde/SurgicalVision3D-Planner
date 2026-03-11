@@ -75,6 +75,7 @@ GENERATED_COAXIAL_TARGET_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedCoaxialN
 GENERATED_COAXIAL_LINE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedCoaxialNavigationLine"
 REFERENCE_PROBE_TEMPLATE_ATTRIBUTE = "SurgicalVision3D_Planner.ReferenceProbeTemplate"
 REFERENCE_PROBE_TEMPLATE_SOURCE_PATH_ATTRIBUTE = "SurgicalVision3D_Planner.ReferenceProbeTemplateSourcePath"
+REFERENCE_PROBE_TEMPLATE_AXIAL_PLACEMENT_OFFSET_MM_ATTRIBUTE = "SurgicalVision3D_Planner.ReferenceProbeTemplateAxialPlacementOffsetMm"
 DEFAULT_TUMOR_SEGMENTATION_NAMES = ("Tumor",)
 DEFAULT_TUMOR_SEGMENT_NAMES = ("Tumor", "tumor", "Target", "target", "Lesion", "lesion")
 DEFAULT_ENDPOINTS_MARKUPS_NAMES = ("endpoints", "Endpoints")
@@ -135,8 +136,9 @@ SAMPLE_DATA_CRLM1001_RELATIVE_THUMBNAIL_PATH = "Resources/Cohorts/CRLM-1001/Demo
 SAMPLE_DATA_ALREADY_REGISTERED = False
 BEGINNER_WORKFLOW_MODE = True
 BEGINNER_GEOMETRY_CATALOG_RELATIVE_PATH = "Resources/geometry_catalog.json"
+REFERENCE_PROBE_TEMPLATE_DIRECTORY_RELATIVE_PATH = "Resources/Geometries"
 BEGINNER_WORKFLOW_BANNER_TEXT = (
-    "Beginner mode: import a case, define one master trajectory, validate it, optionally run endpoint auto-adjust after a failed validation, assess MAM, then lock and derive coaxial guidance."
+    "Beginner mode: import a case, define one master trajectory, validate it, optionally run endpoint auto-adjust after a failed validation, assess MAM, lock and derive coaxial guidance, then export the full planning package."
 )
 BEGINNER_MAM_COLOR_NODE_NAME = "SV3D Beginner MAM Colors"
 BEGINNER_TRAJECTORY_DISTANCE_SAMPLE_COUNT = 121
@@ -231,6 +233,7 @@ class GeometryCatalogEntry:
     displayName: str
     templateRelativePath: str
     activeElementLengthMm: float
+    axialPlacementOffsetMm: float = 0.0
 
 
 @dataclass
@@ -475,14 +478,15 @@ class SurgicalVision3D_Planner(ScriptedLoadableModule):
         self.parent.dependencies = ["SegmentEditor", "FiducialRegistration"]
         self.parent.contributors = ["Juan Verde (Surgeon Scientist)"]
         self.parent.helpText = _("""
-Phase 1 ablation planning prototype:
-1. Generate trajectories from entry/endpoint control-point pairs.
-2. Place translated probe segmentations along trajectories.
-3. Merge translated probes into one ablation zone.
-4. Evaluate tumor-vs-ablation signed margins using signed closest-point distances.
+Research-oriented ablation planning module for 3D Slicer.
+1. Import cases, choose applicator geometries, and define master or paired trajectories.
+2. Generate single or deterministic multi-trajectory probe plans and merge them into one ablation zone.
+3. Evaluate signed margins, MAM coverage, structure safety, and probe-coordination constraints.
+4. Lock validated plans, compute coaxial guidance, and export deterministic cohort/reproducibility artifacts.
 """)
         self.parent.acknowledgementText = _("""
-Legacy AblationPlanner workflow was refactored into this module while preserving scripted-module patterns.
+Refactored from the legacy AblationPlanner workflow and extended with beginner-guided planning,
+derived trajectory arrays, cohort summaries, export bundles, and reproducibility packaging.
 """)
         try:
             slicer.app.connect("startupCompleted()", registerSampleData)
@@ -697,6 +701,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         self._beginnerWorkflowSections: list[ctk.ctkCollapsibleButton] = []
         self._caseFolderLineEdit = None
         self._browseCaseFolderButton = None
+        self._browseExportDirectoryButton = None
         self._importCaseFolderButton = None
         self._openSegmentEditorButton = None
         self._geometryComboBox = None
@@ -721,6 +726,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         self._coaxialSpareSpinBox = None
         self._computeCoaxialPlanButton = None
         self._coaxialStatusLabel = None
+        self._exportWorkflowStatusLabel = None
         self._placeMultipleControlPointsCheckBox = None
         self._endpointsPlaceWidget = None
         self._observedEndpointsMarkupsNode = None
@@ -822,6 +828,8 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         self.ui.runCohortEvaluationButton.connect("clicked(bool)", self.onRunCohortEvaluationButton)
         self.ui.generateReproducibilityPackageButton.connect("clicked(bool)", self.onGenerateReproducibilityPackageButton)
         self.ui.exportBundleButton.connect("clicked(bool)", self.onExportBundleButton)
+        if self._browseExportDirectoryButton:
+            self._browseExportDirectoryButton.connect("clicked(bool)", self.onBrowseExportDirectoryButton)
         self.ui.riskStructuresSegmentationSelector.connect(
             "currentNodeChanged(vtkMRMLNode*)",
             self.onRiskStructuresSegmentationChanged,
@@ -1241,6 +1249,25 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         lockLayout.addRow("Coaxial plan:", self._computeCoaxialPlanButton)
         lockLayout.addRow("Status:", self._coaxialStatusLabel)
 
+        exportSection = ctk.ctkCollapsibleButton()
+        exportSection.text = "Step 7 - Export Plan Package"
+        exportLayout = qt.QFormLayout(exportSection)
+        if hasattr(self.ui, "exportBaseNameLineEdit"):
+            exportLayout.addRow("Export base name:", self.ui.exportBaseNameLineEdit)
+        self._browseExportDirectoryButton = qt.QPushButton("Browse")
+        if hasattr(self.ui, "exportDirectoryLineEdit"):
+            exportLayout.addRow(
+                "Export directory:",
+                self._buildButtonRowWidget(self.ui.exportDirectoryLineEdit, self._browseExportDirectoryButton),
+            )
+        else:
+            self._browseExportDirectoryButton = None
+        exportLayout.addRow("Package:", self.ui.exportBundleButton)
+        if hasattr(self.ui, "exportStatusLabel"):
+            exportLayout.addRow("Last export:", self.ui.exportStatusLabel)
+        self._exportWorkflowStatusLabel = self._createStatusLabel("Blocked: complete Step 6 first.")
+        exportLayout.addRow("Status:", self._exportWorkflowStatusLabel)
+
         self._beginnerWorkflowSections = [
             importSection,
             segmentationSection,
@@ -1248,6 +1275,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             validationSection,
             applicatorSection,
             lockSection,
+            exportSection,
         ]
         for section in reversed(self._beginnerWorkflowSections):
             uiWidget.layout().insertWidget(0, section)
@@ -1971,7 +1999,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             # Core inputs
             "probeSegmentationSelector": (
                 "Select the reference probe/applicator template segmentation. This source geometry is duplicated and "
-                "placed on each trajectory during 'Place Probes'. STL templates in Resources/geometries are auto-loaded "
+                "placed on each trajectory during 'Place Probes'. STL templates in Resources/Geometries are auto-loaded "
                 "into this selector. The template is expected to be oriented along local -Z."
             ),
             "endpointsMarkupsSelector": (
@@ -2074,7 +2102,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             "includeCoverageTablesCheckBox": "Include coverage summary tables in export when present.",
             "includeFeasibilityTablesCheckBox": "Include feasibility and gating tables in export when present.",
             "includeCoordinationTablesCheckBox": "Include probe coordination and no-touch tables in export.",
-            "exportBundleButton": "Write a deterministic export bundle (JSON + CSV + manifest) without mutating the plan.",
+            "exportBundleButton": "Write a deterministic export bundle with JSON/CSV tables, metric snapshots, screenshots, scene package, and manifest.",
         }
         for widgetName, tooltipText in tooltipsByWidgetName.items():
             widget = getattr(self.ui, widgetName, None)
@@ -2159,6 +2187,22 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             )
         if self._computeCoaxialPlanButton:
             self._computeCoaxialPlanButton.setToolTip("Derive the coaxial navigation target for the selected technique.")
+        if hasattr(self.ui, "exportBaseNameLineEdit"):
+            self.ui.exportBaseNameLineEdit.setToolTip(
+                "Name prefix for the Step 7 package folder (screenshots, scene, tables, and planning summaries)."
+            )
+        if hasattr(self.ui, "exportDirectoryLineEdit"):
+            self.ui.exportDirectoryLineEdit.setToolTip(
+                "Destination directory for Step 7 packages. Empty uses the default Slicer temp export folder."
+            )
+        if self._browseExportDirectoryButton:
+            self._browseExportDirectoryButton.setToolTip(
+                "Browse and choose destination directory for the Step 7 export package."
+            )
+        if hasattr(self.ui, "exportBundleButton"):
+            self.ui.exportBundleButton.setToolTip(
+                "Export full planning package: JSON/CSV tables, metric snapshots, screenshots, and scene bundle."
+            )
 
     def cleanup(self) -> None:
         self.removeObservers()
@@ -2617,6 +2661,8 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self._parameterNode.exportManifestPreviewTable = None
         if clearReferences and hasattr(self.ui, "exportStatusLabel"):
             self.ui.exportStatusLabel.text = "No export run yet."
+        if clearReferences and self._exportWorkflowStatusLabel:
+            self._setStatusLabelText(self._exportWorkflowStatusLabel, "Blocked: complete Step 6 first.")
 
     def _clearOwnedCohortOutputs(self, clearReferences: bool = False) -> None:
         if not self.logic or not self._parameterNode:
@@ -2762,6 +2808,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                     getattr(self.ui, buttonName).enabled = False
             for widget in (
                 self._browseCaseFolderButton,
+                self._browseExportDirectoryButton,
                 self._importCaseFolderButton,
                 self._openSegmentEditorButton,
                 self._planningModeComboBox,
@@ -2899,13 +2946,17 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             )
         else:
             self.ui.evaluateProbeCoordinationButton.enabled = hasEvenEndpointPairs and not isLocked
-        exportModeText = str(self.ui.exportModeComboBox.currentText) if hasattr(self.ui, "exportModeComboBox") else str(self._parameterNode.exportMode)
-        scenarioRequired = exportModeText == "SelectedScenario"
-        selectedScenarioID = (
-            str(self.ui.selectedExportScenarioIDLineEdit.text)
-            if hasattr(self.ui, "selectedExportScenarioIDLineEdit")
-            else str(self._parameterNode.selectedExportScenarioID)
-        )
+        if BEGINNER_WORKFLOW_MODE:
+            scenarioRequired = False
+            selectedScenarioID = ""
+        else:
+            exportModeText = str(self.ui.exportModeComboBox.currentText) if hasattr(self.ui, "exportModeComboBox") else str(self._parameterNode.exportMode)
+            scenarioRequired = exportModeText == "SelectedScenario"
+            selectedScenarioID = (
+                str(self.ui.selectedExportScenarioIDLineEdit.text)
+                if hasattr(self.ui, "selectedExportScenarioIDLineEdit")
+                else str(self._parameterNode.selectedExportScenarioID)
+            )
         exportBaseName = (
             str(self.ui.exportBaseNameLineEdit.text)
             if hasattr(self.ui, "exportBaseNameLineEdit")
@@ -2921,7 +2972,9 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             if hasattr(self.ui, "packageBaseNameLineEdit")
             else str(self._parameterNode.packageBaseName)
         )
-        self.ui.exportBundleButton.enabled = bool(exportBaseName.strip()) and (not scenarioRequired or bool(selectedScenarioID.strip()))
+        exportInputReady = bool(exportBaseName.strip()) and (not scenarioRequired or bool(selectedScenarioID.strip()))
+        beginnerExportReady = bool(isLocked and hasMasterPlanSnapshot)
+        self.ui.exportBundleButton.enabled = exportInputReady and (beginnerExportReady if BEGINNER_WORKFLOW_MODE else True)
         self.ui.runCohortEvaluationButton.enabled = bool(cohortStudyDefinitionPath.strip())
         if hasattr(self.ui, "loadSampleCaseButton"):
             self.ui.loadSampleCaseButton.enabled = bool(self._selectedSampleCaseScenePath())
@@ -2929,6 +2982,8 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self.ui.generateReproducibilityPackageButton.enabled = bool(packageBaseName.strip())
         if self._browseCaseFolderButton:
             self._browseCaseFolderButton.enabled = True
+        if self._browseExportDirectoryButton:
+            self._browseExportDirectoryButton.enabled = True
         if self._importCaseFolderButton:
             self._importCaseFolderButton.enabled = bool(str(self._caseFolderLineEdit.text).strip()) if self._caseFolderLineEdit else False
         if self._openSegmentEditorButton:
@@ -3017,6 +3072,18 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 else:
                     step6StatusText = "Ready: click Lock Master Plan."
             self._setStatusLabelText(self._coaxialStatusLabel, step6StatusText)
+        if self._exportWorkflowStatusLabel:
+            if not BEGINNER_WORKFLOW_MODE:
+                step7StatusText = "Ready: click Export Bundle."
+            elif not isLocked:
+                step7StatusText = "Blocked: complete Step 6 lock first."
+            elif not hasMasterPlanSnapshot:
+                step7StatusText = "Blocked: lock snapshot is missing. Reset and lock again."
+            elif not exportInputReady:
+                step7StatusText = "Blocked: set export package name."
+            else:
+                step7StatusText = "Ready: export full planning package (data + metrics + screenshots + scene)."
+            self._setStatusLabelText(self._exportWorkflowStatusLabel, step7StatusText)
         if self._derivedArrayStatusLabel:
             if not isMultiTrajectoryArrayMode:
                 self._setStatusLabelText(self._derivedArrayStatusLabel, "Array disabled: planning mode is Single.")
@@ -3296,6 +3363,25 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self._caseFolderLineEdit.text = str(selectedDirectory)
         if self._parameterNode:
             self._parameterNode.caseFolderPath = str(selectedDirectory)
+        self._updateButtonStates()
+
+    def onBrowseExportDirectoryButton(self) -> None:
+        currentDirectory = ""
+        if hasattr(self.ui, "exportDirectoryLineEdit"):
+            currentDirectory = str(self.ui.exportDirectoryLineEdit.text or "").strip()
+        if not currentDirectory and self._parameterNode:
+            currentDirectory = str(self._parameterNode.lastExportDirectory or "").strip()
+        selectedDirectory = qt.QFileDialog.getExistingDirectory(
+            self.parent,
+            "Select Export Directory",
+            currentDirectory,
+        )
+        if not selectedDirectory:
+            return
+        if hasattr(self.ui, "exportDirectoryLineEdit"):
+            self.ui.exportDirectoryLineEdit.text = str(selectedDirectory)
+        if self._parameterNode:
+            self._parameterNode.lastExportDirectory = str(selectedDirectory)
         self._updateButtonStates()
 
     def onImportCaseFolderButton(self) -> None:
@@ -4799,12 +4885,20 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         if not self._parameterNode:
             return PlanExportConfig()
 
-        exportMode = str(self.ui.exportModeComboBox.currentText) if hasattr(self.ui, "exportModeComboBox") else str(self._parameterNode.exportMode)
-        selectedExportScenarioID = (
-            str(self.ui.selectedExportScenarioIDLineEdit.text)
-            if hasattr(self.ui, "selectedExportScenarioIDLineEdit")
-            else str(self._parameterNode.selectedExportScenarioID)
-        )
+        if BEGINNER_WORKFLOW_MODE:
+            exportMode = "CurrentWorkingPlan"
+            selectedExportScenarioID = ""
+        else:
+            exportMode = (
+                str(self.ui.exportModeComboBox.currentText)
+                if hasattr(self.ui, "exportModeComboBox")
+                else str(self._parameterNode.exportMode)
+            )
+            selectedExportScenarioID = (
+                str(self.ui.selectedExportScenarioIDLineEdit.text)
+                if hasattr(self.ui, "selectedExportScenarioIDLineEdit")
+                else str(self._parameterNode.selectedExportScenarioID)
+            )
         exportBaseName = str(self.ui.exportBaseNameLineEdit.text) if hasattr(self.ui, "exportBaseNameLineEdit") else str(self._parameterNode.exportBaseName)
         exportDirectory = (
             str(self.ui.exportDirectoryLineEdit.text)
@@ -4868,6 +4962,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                     "SelectedScenarioID": exportConfig.selectedExportScenarioID,
                     "SelectedScenarioName": str(exportResult.get("selectedScenarioName", "")),
                     "FileCount": int(exportResult["fileCount"]),
+                    "WarningCount": int(exportResult.get("warningCount", 0)),
                     "LastExportStatus": str(exportResult["status"]),
                     "LastExportDirectory": str(exportResult["bundlePath"]),
                     "LastExportSequence": int(exportResult["exportSequence"]),
@@ -4879,9 +4974,9 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self._parameterNode.exportManifestPreviewTable = exportManifestPreviewTable
 
             if hasattr(self.ui, "exportStatusLabel"):
-                self.ui.exportStatusLabel.text = (
-                    f"Exported {int(exportResult['fileCount'])} files to {str(exportResult['bundlePath'])}"
-                )
+                warningCount = int(exportResult.get("warningCount", 0))
+                warningSuffix = f" with {warningCount} warning(s)" if warningCount > 0 else ""
+                self.ui.exportStatusLabel.text = f"Exported {int(exportResult['fileCount'])} files to {str(exportResult['bundlePath'])}{warningSuffix}"
             self._updateButtonStates()
 
 
@@ -4986,6 +5081,7 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
                     displayName=displayName,
                     templateRelativePath=templateRelativePath,
                     activeElementLengthMm=float(entry.get("activeElementLengthMm", 30.0)),
+                    axialPlacementOffsetMm=float(entry.get("axialPlacementOffsetMm", 0.0)),
                 )
             )
         return geometryEntries
@@ -5007,6 +5103,10 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         for templateNode in self.ensureReferenceProbeTemplatesLoaded():
             sourcePath = templateNode.GetAttribute(REFERENCE_PROBE_TEMPLATE_SOURCE_PATH_ATTRIBUTE) or ""
             if sourcePath and self._normalizeFilesystemPath(sourcePath) == normalizedTemplatePath:
+                templateNode.SetAttribute(
+                    REFERENCE_PROBE_TEMPLATE_AXIAL_PLACEMENT_OFFSET_MM_ATTRIBUTE,
+                    f"{float(geometryEntry.axialPlacementOffsetMm):.6f}",
+                )
                 return templateNode
         return None
 
@@ -5237,6 +5337,245 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         with outputJsonPath.open("w", encoding="utf-8", newline="\n") as jsonFile:
             json.dump(summaryData, jsonFile, indent=2, sort_keys=True)
 
+    @staticmethod
+    def exportKeyValueDictionaryToCsv(outputCsvPath: Path, valuesByKey: dict[str, Any]) -> None:
+        outputCsvPath.parent.mkdir(parents=True, exist_ok=True)
+        with outputCsvPath.open("w", encoding="utf-8", newline="") as csvFile:
+            writer = csv.writer(csvFile)
+            writer.writerow(("Metric", "Value"))
+            for metricName in sorted(valuesByKey.keys()):
+                writer.writerow((metricName, valuesByKey.get(metricName, "")))
+
+    def collectPlanMetricsSnapshot(self, parameterNode: SurgicalVision3D_PlannerParameterNode) -> dict[str, Any]:
+        planSummaryRows = self._tableNodeToDictionaries(parameterNode.planSummaryTable)
+        coverageRows = self._tableNodeToDictionaries(self._findFirstTableNodeByName("SV3D Coverage Summary"))
+        safetyRows = self._tableNodeToDictionaries(parameterNode.structureSafetySummaryTable)
+        coordinationRows = self._tableNodeToDictionaries(parameterNode.probeCoordinationSummaryTable)
+        planRow = planSummaryRows[0] if len(planSummaryRows) > 0 else {}
+        coverageRow = coverageRows[0] if len(coverageRows) > 0 else {}
+        coordinationRow = coordinationRows[0] if len(coordinationRows) > 0 else {}
+
+        metrics: dict[str, Any] = {
+            "MasterTrajectoryLocked": bool(parameterNode.masterTrajectoryLocked),
+            "TrajectoryPlanningMode": str(parameterNode.trajectoryPlanningMode or "Single"),
+            "DerivedTrajectoryCount": int(parameterNode.derivedTrajectoryCount),
+            "MamThresholdMm": float(parameterNode.mamMm),
+            "CoaxialTechnique": str(parameterNode.coaxialTechnique or "PullBack"),
+            "CoaxialSpareMm": float(parameterNode.coaxialSpareMm),
+        }
+
+        trajectoryCount = self._firstNumericValue([planRow], ["Trajectory Count", "TrajectoryCount"])
+        minMargin = self._firstNumericValue([planRow], ["Minimum Signed Margin (mm)", "MinSignedMarginMm"])
+        meanMargin = self._firstNumericValue([planRow], ["Mean Signed Margin (mm)", "MeanSignedMarginMm"])
+        medianMargin = self._firstNumericValue([planRow], ["Median Signed Margin (mm)", "MedianSignedMarginMm"])
+        coveragePercent = self._firstNumericValue([coverageRow], ["CoveragePercent", "Coverage Percent", "Coverage (%)"])
+        if trajectoryCount is not None:
+            metrics["TrajectoryCount"] = int(round(trajectoryCount))
+        if minMargin is not None:
+            metrics["MinSignedMarginMm"] = float(minMargin)
+        if meanMargin is not None:
+            metrics["MeanSignedMarginMm"] = float(meanMargin)
+        if medianMargin is not None:
+            metrics["MedianSignedMarginMm"] = float(medianMargin)
+        if coveragePercent is not None:
+            metrics["CoveragePercent"] = float(coveragePercent)
+
+        coordinationGatePassRaw = self._firstStringValue([coordinationRow], ["Coordination Gate Pass", "CoordinationGatePass"])
+        if coordinationGatePassRaw:
+            metrics["CoordinationGatePass"] = bool(self._coerceBoolean(coordinationGatePassRaw, defaultValue=True))
+
+        structureDistances = [
+            self._firstNumericValue([row], ["Minimum Distance (mm)", "MinDistanceMm"])
+            for row in safetyRows
+        ]
+        finiteDistances = [value for value in structureDistances if value is not None and math.isfinite(value)]
+        if len(finiteDistances) > 0:
+            metrics["WorstStructureMinDistanceMm"] = float(min(finiteDistances))
+
+        try:
+            mamSummary = json.loads(str(parameterNode.mamAssessmentSummaryJson or "{}"))
+        except Exception:
+            mamSummary = {}
+        if isinstance(mamSummary, dict):
+            if "MamPass" in mamSummary:
+                metrics["MamPass"] = bool(mamSummary.get("MamPass"))
+            minimumAchievedMargin = mamSummary.get("MinimumAchievedMarginMm")
+            try:
+                if minimumAchievedMargin is not None and math.isfinite(float(minimumAchievedMargin)):
+                    metrics["MinimumAchievedMarginMm"] = float(minimumAchievedMargin)
+            except Exception:
+                pass
+
+        try:
+            coaxialSummary = json.loads(str(parameterNode.coaxialPlanSummaryJson or "{}"))
+        except Exception:
+            coaxialSummary = {}
+        if isinstance(coaxialSummary, dict):
+            activeElementLengthMm = coaxialSummary.get("activeElementLengthMm")
+            pushThroughOffsetMm = coaxialSummary.get("pushThroughOffsetMm")
+            try:
+                if activeElementLengthMm is not None and math.isfinite(float(activeElementLengthMm)):
+                    metrics["CoaxialActiveElementLengthMm"] = float(activeElementLengthMm)
+            except Exception:
+                pass
+            try:
+                if pushThroughOffsetMm is not None and math.isfinite(float(pushThroughOffsetMm)):
+                    metrics["CoaxialPushThroughOffsetMm"] = float(pushThroughOffsetMm)
+            except Exception:
+                pass
+
+        return metrics
+
+    def exportPlanningScreenshots(self, outputDirectory: Path) -> tuple[list[Path], list[str], list[dict[str, str]]]:
+        outputDirectory.mkdir(parents=True, exist_ok=True)
+        savedCapturePaths: list[Path] = []
+        warnings: list[str] = []
+        captureEntries: list[dict[str, str]] = []
+
+        def captureWidget(captureName: str, widget) -> None:
+            fileName = f"{captureName}.png"
+            entry = {
+                "CaptureName": captureName,
+                "FileName": fileName,
+                "Status": "Skipped",
+                "Warning": "",
+            }
+            if widget is None:
+                warningText = f"Screenshot '{captureName}' skipped: widget is unavailable."
+                warnings.append(warningText)
+                entry["Status"] = "Skipped"
+                entry["Warning"] = warningText
+                captureEntries.append(entry)
+                return
+
+            try:
+                pixmap = widget.grab() if hasattr(widget, "grab") else None
+                if (pixmap is None or pixmap.isNull()) and hasattr(qt.QPixmap, "grabWidget"):
+                    pixmap = qt.QPixmap.grabWidget(widget)
+                if pixmap is None or pixmap.isNull():
+                    warningText = f"Screenshot '{captureName}' skipped: capture returned an empty pixmap."
+                    warnings.append(warningText)
+                    entry["Status"] = "Skipped"
+                    entry["Warning"] = warningText
+                    captureEntries.append(entry)
+                    return
+
+                outputPath = outputDirectory / fileName
+                if not bool(pixmap.save(str(outputPath), "PNG")):
+                    warningText = f"Screenshot '{captureName}' failed to save at '{outputPath}'."
+                    warnings.append(warningText)
+                    entry["Status"] = "Failed"
+                    entry["Warning"] = warningText
+                    captureEntries.append(entry)
+                    return
+
+                savedCapturePaths.append(outputPath)
+                entry["Status"] = "Saved"
+                captureEntries.append(entry)
+            except Exception as exc:
+                warningText = f"Screenshot '{captureName}' failed: {exc}"
+                warnings.append(warningText)
+                entry["Status"] = "Failed"
+                entry["Warning"] = warningText
+                captureEntries.append(entry)
+
+        mainWindow = None
+        try:
+            mainWindow = slicer.util.mainWindow()
+        except Exception:
+            mainWindow = None
+        captureWidget("main_window", mainWindow)
+
+        layoutManager = slicer.app.layoutManager() if hasattr(slicer.app, "layoutManager") else None
+        threeDView = None
+        if layoutManager and hasattr(layoutManager, "threeDViewCount") and int(layoutManager.threeDViewCount) > 0:
+            try:
+                threeDWidget = layoutManager.threeDWidget(0)
+                if threeDWidget and hasattr(threeDWidget, "threeDView"):
+                    threeDView = threeDWidget.threeDView()
+            except Exception:
+                threeDView = None
+        captureWidget("three_d_view", threeDView)
+
+        for sliceName in ("Red", "Yellow", "Green"):
+            sliceView = None
+            if layoutManager and hasattr(layoutManager, "sliceWidget"):
+                try:
+                    sliceWidget = layoutManager.sliceWidget(sliceName)
+                    if sliceWidget and hasattr(sliceWidget, "sliceView"):
+                        sliceView = sliceWidget.sliceView()
+                except Exception:
+                    sliceView = None
+            captureWidget(f"slice_{sliceName.lower()}", sliceView)
+
+        return savedCapturePaths, warnings, captureEntries
+
+    def exportCurrentSceneBundle(self, outputDirectory: Path) -> tuple[list[Path], list[str], dict[str, Any]]:
+        outputDirectory.mkdir(parents=True, exist_ok=True)
+        exportedPaths: list[Path] = []
+        warnings: list[str] = []
+        sceneSummary: dict[str, Any] = {
+            "SceneBundleFile": "planning_scene.mrb",
+            "SceneBundleStatus": "NotAttempted",
+            "NodeCount": 0,
+        }
+
+        sceneBundlePath = outputDirectory / "planning_scene.mrb"
+        saveScene = getattr(slicer.util, "saveScene", None)
+        if callable(saveScene):
+            try:
+                if bool(saveScene(str(sceneBundlePath))):
+                    exportedPaths.append(sceneBundlePath)
+                    sceneSummary["SceneBundleStatus"] = "Saved"
+                else:
+                    warningText = f"Scene bundle export failed: saveScene returned false for '{sceneBundlePath}'."
+                    warnings.append(warningText)
+                    sceneSummary["SceneBundleStatus"] = "Failed"
+            except Exception as exc:
+                warningText = f"Scene bundle export failed: {exc}"
+                warnings.append(warningText)
+                sceneSummary["SceneBundleStatus"] = "Failed"
+        else:
+            warningText = "Scene bundle export skipped: slicer.util.saveScene is unavailable."
+            warnings.append(warningText)
+            sceneSummary["SceneBundleStatus"] = "Skipped"
+
+        nodeInventory: list[dict[str, str]] = []
+        scene = slicer.mrmlScene
+        if scene:
+            for nodeIndex in range(int(scene.GetNumberOfNodes())):
+                node = scene.GetNthNode(nodeIndex)
+                if not node:
+                    continue
+                nodeInventory.append(
+                    {
+                        "NodeID": str(node.GetID() or ""),
+                        "NodeName": str(node.GetName() or ""),
+                        "NodeClassName": str(node.GetClassName() or ""),
+                    }
+                )
+        sceneSummary["NodeCount"] = int(len(nodeInventory))
+
+        nodeInventoryJsonPath = outputDirectory / "scene_node_inventory.json"
+        self.exportStructuredSummaryToJson(nodeInventoryJsonPath, nodeInventory)
+        exportedPaths.append(nodeInventoryJsonPath)
+
+        nodeInventoryCsvPath = outputDirectory / "scene_node_inventory.csv"
+        with nodeInventoryCsvPath.open("w", encoding="utf-8", newline="") as csvFile:
+            writer = csv.writer(csvFile)
+            writer.writerow(("NodeID", "NodeName", "NodeClassName"))
+            for nodeEntry in nodeInventory:
+                writer.writerow(
+                    (
+                        nodeEntry.get("NodeID", ""),
+                        nodeEntry.get("NodeName", ""),
+                        nodeEntry.get("NodeClassName", ""),
+                    )
+                )
+        exportedPaths.append(nodeInventoryCsvPath)
+
+        return exportedPaths, warnings, sceneSummary
+
     def collectCurrentPlanExportData(
         self,
         parameterNode: SurgicalVision3D_PlannerParameterNode,
@@ -5409,15 +5748,30 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         bundlePath.mkdir(parents=True, exist_ok=False)
         tablesDirectory = bundlePath / "tables"
         provenanceDirectory = bundlePath / "provenance"
+        metricsDirectory = bundlePath / "metrics"
+        screenshotsDirectory = bundlePath / "screenshots"
+        sceneDirectory = bundlePath / "scene"
         tablesDirectory.mkdir(parents=True, exist_ok=True)
         provenanceDirectory.mkdir(parents=True, exist_ok=True)
+        metricsDirectory.mkdir(parents=True, exist_ok=True)
+        screenshotsDirectory.mkdir(parents=True, exist_ok=True)
+        sceneDirectory.mkdir(parents=True, exist_ok=True)
 
         currentPlanSummary, tableExports = self.collectCurrentPlanExportData(parameterNode, exportConfig)
         exportedFiles: list[str] = []
+        exportedFileSet: set[str] = set()
+        exportWarnings: list[str] = []
+
+        def addExportedFile(absolutePath: Path) -> None:
+            relativePath = str(absolutePath.relative_to(bundlePath)).replace("\\", "/")
+            if relativePath in exportedFileSet:
+                return
+            exportedFileSet.add(relativePath)
+            exportedFiles.append(relativePath)
 
         planSummaryPath = bundlePath / "plan_summary.json"
         self.exportStructuredSummaryToJson(planSummaryPath, currentPlanSummary)
-        exportedFiles.append(str(planSummaryPath.relative_to(bundlePath)))
+        addExportedFile(planSummaryPath)
 
         selectedScenarioSummary: dict[str, Any] = {}
         shouldIncludeSelectedScenario = bool(exportConfig.includeSelectedScenario or exportConfig.exportMode == "SelectedScenario")
@@ -5425,24 +5779,54 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             selectedScenarioSummary = self.collectScenarioExportData(exportConfig.selectedExportScenarioID)
             scenarioSummaryPath = bundlePath / "scenario_summary.json"
             self.exportStructuredSummaryToJson(scenarioSummaryPath, selectedScenarioSummary)
-            exportedFiles.append(str(scenarioSummaryPath.relative_to(bundlePath)))
+            addExportedFile(scenarioSummaryPath)
 
         for tableFileName, tableNode in tableExports:
             outputCsvPath = tablesDirectory / tableFileName
             self.exportTableNodeToCsv(tableNode, outputCsvPath)
-            exportedFiles.append(str(outputCsvPath.relative_to(bundlePath)))
+            addExportedFile(outputCsvPath)
 
         scenarioRegistryTable = self._findFirstTableNodeByName("SV3D Scenario Registry")
         if scenarioRegistryTable:
             scenarioRegistryJsonPath = provenanceDirectory / "scenario_registry.json"
             self.exportStructuredSummaryToJson(scenarioRegistryJsonPath, self._tableNodeToDictionaries(scenarioRegistryTable))
-            exportedFiles.append(str(scenarioRegistryJsonPath.relative_to(bundlePath)))
+            addExportedFile(scenarioRegistryJsonPath)
 
         recommendationSummaryTable = self._findFirstTableNodeByName("SV3D Feasible Candidate Recommendation")
         if recommendationSummaryTable:
             recommendationJsonPath = provenanceDirectory / "recommendation_summary.json"
             self.exportStructuredSummaryToJson(recommendationJsonPath, self._tableNodeToDictionaries(recommendationSummaryTable))
-            exportedFiles.append(str(recommendationJsonPath.relative_to(bundlePath)))
+            addExportedFile(recommendationJsonPath)
+
+        metricsSnapshot = self.collectPlanMetricsSnapshot(parameterNode)
+        metricsSnapshotJsonPath = metricsDirectory / "plan_metrics_snapshot.json"
+        self.exportStructuredSummaryToJson(metricsSnapshotJsonPath, metricsSnapshot)
+        addExportedFile(metricsSnapshotJsonPath)
+        metricsSnapshotCsvPath = tablesDirectory / "plan_metrics_snapshot.csv"
+        self.exportKeyValueDictionaryToCsv(metricsSnapshotCsvPath, metricsSnapshot)
+        addExportedFile(metricsSnapshotCsvPath)
+
+        screenshotPaths, screenshotWarnings, screenshotManifestEntries = self.exportPlanningScreenshots(screenshotsDirectory)
+        exportWarnings.extend(screenshotWarnings)
+        screenshotsManifestPath = screenshotsDirectory / "capture_manifest.json"
+        self.exportStructuredSummaryToJson(screenshotsManifestPath, screenshotManifestEntries)
+        addExportedFile(screenshotsManifestPath)
+        for screenshotPath in screenshotPaths:
+            addExportedFile(screenshotPath)
+
+        scenePaths, sceneWarnings, sceneManifest = self.exportCurrentSceneBundle(sceneDirectory)
+        exportWarnings.extend(sceneWarnings)
+        sceneManifestPath = sceneDirectory / "scene_manifest.json"
+        self.exportStructuredSummaryToJson(sceneManifestPath, sceneManifest)
+        addExportedFile(sceneManifestPath)
+        for scenePath in scenePaths:
+            addExportedFile(scenePath)
+
+        uniqueWarnings = sorted(set(str(warning) for warning in exportWarnings if str(warning).strip()))
+        if len(uniqueWarnings) > 0:
+            warningsPath = provenanceDirectory / "export_warnings.json"
+            self.exportStructuredSummaryToJson(warningsPath, {"warnings": uniqueWarnings})
+            addExportedFile(warningsPath)
 
         manifest = self.buildPlanExportManifest(
             parameterNode=parameterNode,
@@ -5451,19 +5835,26 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             filesExported=exportedFiles,
             selectedScenarioSummary=selectedScenarioSummary,
         )
+        if len(uniqueWarnings) > 0:
+            warningNote = f"Export warnings: {len(uniqueWarnings)} (see provenance/export_warnings.json)."
+            manifest.notes = f"{str(manifest.notes or '').strip()} {warningNote}".strip()
         manifestPath = bundlePath / "manifest.json"
-        exportedFiles.insert(0, str(manifestPath.relative_to(bundlePath)))
-        manifest.filesExported = list(exportedFiles)
+        manifestRelativePath = str(manifestPath.relative_to(bundlePath)).replace("\\", "/")
+        manifest.filesExported = [manifestRelativePath, *exportedFiles]
         self.exportStructuredSummaryToJson(manifestPath, asdict(manifest))
+        fileCount = int(len(manifest.filesExported))
+        statusText = "SuccessWithWarnings" if len(uniqueWarnings) > 0 else "Success"
 
         return {
             "manifest": manifest,
             "bundlePath": str(bundlePath),
             "exportDirectory": str(exportRoot),
             "exportSequence": int(exportSequence),
-            "fileCount": int(len(exportedFiles)),
-            "status": "Success",
+            "fileCount": fileCount,
+            "status": statusText,
             "selectedScenarioName": str(selectedScenarioSummary.get("ScenarioName", "")),
+            "warningCount": int(len(uniqueWarnings)),
+            "warnings": uniqueWarnings,
         }
 
     @staticmethod
@@ -5812,7 +6203,7 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         return closedSurface
 
     def discoverReferenceProbeTemplateFiles(self) -> list[Path]:
-        geometriesDirectory = self._resolveResourcePath("Resources/geometries")
+        geometriesDirectory = self._resolveResourcePath(REFERENCE_PROBE_TEMPLATE_DIRECTORY_RELATIVE_PATH)
         if not geometriesDirectory.exists():
             logging.warning("Reference probe template directory was not found: %s", geometriesDirectory)
             return []
@@ -5836,6 +6227,13 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         if len(templatePaths) == 0:
             return []
 
+        catalogOffsetsByTemplatePath: dict[str, float] = {}
+        for geometryEntry in self.loadGeometryCatalog():
+            resolvedTemplatePath = self._resolveResourcePath(geometryEntry.templateRelativePath)
+            normalizedCatalogTemplatePath = self._normalizeFilesystemPath(resolvedTemplatePath)
+            if normalizedCatalogTemplatePath not in catalogOffsetsByTemplatePath:
+                catalogOffsetsByTemplatePath[normalizedCatalogTemplatePath] = float(geometryEntry.axialPlacementOffsetMm)
+
         existingTemplatesByPath: dict[str, vtkMRMLSegmentationNode] = {}
         for segmentationNode in slicer.util.getNodesByClass("vtkMRMLSegmentationNode"):
             sourcePath = segmentationNode.GetAttribute(REFERENCE_PROBE_TEMPLATE_SOURCE_PATH_ATTRIBUTE)
@@ -5851,6 +6249,10 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             existingTemplate = existingTemplatesByPath.get(normalizedTemplatePath)
             if existingTemplate and slicer.mrmlScene.IsNodePresent(existingTemplate):
                 existingTemplate.SetHideFromEditors(True)
+                existingTemplate.SetAttribute(
+                    REFERENCE_PROBE_TEMPLATE_AXIAL_PLACEMENT_OFFSET_MM_ATTRIBUTE,
+                    f"{float(catalogOffsetsByTemplatePath.get(normalizedTemplatePath, 0.0)):.6f}",
+                )
                 loadedTemplates.append(existingTemplate)
                 continue
 
@@ -5872,6 +6274,10 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
 
             templateNode.SetAttribute(REFERENCE_PROBE_TEMPLATE_ATTRIBUTE, "1")
             templateNode.SetAttribute(REFERENCE_PROBE_TEMPLATE_SOURCE_PATH_ATTRIBUTE, str(templatePath))
+            templateNode.SetAttribute(
+                REFERENCE_PROBE_TEMPLATE_AXIAL_PLACEMENT_OFFSET_MM_ATTRIBUTE,
+                f"{float(catalogOffsetsByTemplatePath.get(normalizedTemplatePath, 0.0)):.6f}",
+            )
             templateNode.SetHideFromEditors(True)
             if templateNode.GetDisplayNode():
                 templateNode.GetDisplayNode().SetVisibility(False)
@@ -7360,6 +7766,7 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         self,
         referenceProbeSegmentation: vtkMRMLSegmentationNode | None,
         trajectories: Sequence[ProbeTrajectory],
+        axialPlacementOffsetMm: float | None = None,
     ) -> list[str]:
         referenceProbeSegmentation = self.resolveUsableReferenceProbeSegmentation(referenceProbeSegmentation)
         if not referenceProbeSegmentation:
@@ -7381,6 +7788,15 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         if not self._polyDataHasFinitePoints(sourceSurface):
             raise RuntimeError("Reference probe segmentation has non-finite closed-surface coordinates.")
 
+        if axialPlacementOffsetMm is None:
+            try:
+                axialPlacementOffsetMm = float(
+                    referenceProbeSegmentation.GetAttribute(REFERENCE_PROBE_TEMPLATE_AXIAL_PLACEMENT_OFFSET_MM_ATTRIBUTE) or 0.0
+                )
+            except Exception:
+                axialPlacementOffsetMm = 0.0
+        axialPlacementOffsetMm = float(axialPlacementOffsetMm or 0.0)
+
         generatedProbeNodeIDs: list[str] = []
         try:
             with self._mrmlBatchState("BatchProcessState"):
@@ -7391,7 +7807,11 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
                         trajectory.trajectoryIndex,
                         sourceSurface=sourceSurface,
                     )
-                    self._placeProbeNodeAlongTrajectory(probeNode, trajectory)
+                    self._placeProbeNodeAlongTrajectory(
+                        probeNode,
+                        trajectory,
+                        axialPlacementOffsetMm=axialPlacementOffsetMm,
+                    )
                     trajectory.generatedProbeNodeID = probeNode.GetID()
                     trajectory.status = "placed"
                     generatedProbeNodeIDs.append(probeNode.GetID())
@@ -9559,6 +9979,7 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             "SelectedScenarioID",
             "SelectedScenarioName",
             "FileCount",
+            "WarningCount",
             "LastExportStatus",
             "LastExportDirectory",
             "LastExportSequence",
@@ -10157,9 +10578,18 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             clonedDisplayNode.SetVisibility(True)
         return clonedProbeNode
 
-    def _placeProbeNodeAlongTrajectory(self, probeNode: vtkMRMLSegmentationNode, trajectory: ProbeTrajectory) -> None:
+    def _placeProbeNodeAlongTrajectory(
+        self,
+        probeNode: vtkMRMLSegmentationNode,
+        trajectory: ProbeTrajectory,
+        axialPlacementOffsetMm: float = 0.0,
+    ) -> None:
         rotationMatrix = rotation_matrix_from_vectors(REFERENCE_PROBE_DIRECTION_RAS, trajectory.directionVector)
-        transformMatrix = _build_rigid_transform(rotationMatrix, trajectory.entryPointRAS)
+        placementOrigin = np.asarray(trajectory.entryPointRAS, dtype=float)
+        if abs(float(axialPlacementOffsetMm)) > 1e-6:
+            trajectoryDirection = _normalize_vector(trajectory.directionVector)
+            placementOrigin = placementOrigin + (trajectoryDirection * float(axialPlacementOffsetMm))
+        transformMatrix = _build_rigid_transform(rotationMatrix, placementOrigin.tolist())
 
         transformNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTransformNode", f"ProbePlacement_{trajectory.trajectoryIndex + 1:02d}")
         transformNode.SetMatrixTransformToParent(slicer.util.vtkMatrixFromArray(transformMatrix))

@@ -1,26 +1,41 @@
 #-----------------------------------------------------------------------------
 set(MODULE_NAME SurgicalVision3D_Planner)
 
+file(GLOB MODULE_GEOMETRY_RESOURCES RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
+  Resources/Geometries/*.stl
+  )
+
+file(GLOB MODULE_SAMPLE_CASE_RESOURCES RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
+  Resources/Cohorts/CRLM-1001/*.csv
+  Resources/Cohorts/CRLM-1001/*.mrk.json
+  Resources/Cohorts/CRLM-1001/*.mrml
+  Resources/Cohorts/CRLM-1001/*.nrrd
+  Resources/Cohorts/CRLM-1001/*.png
+  )
+
 #-----------------------------------------------------------------------------
 set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}.py
   )
 
 set(MODULE_PYTHON_RESOURCES
+  BEGINNER_STEP_BY_STEP.md
+  MULTI_TRAJECTORY_ARRAY_SPEC.md
+  PHASE1_REFACTOR_NOTES.md
+  PREREQUISITES.md
+  USAGE_GUIDE.md
   Resources/Icons/${MODULE_NAME}.png
   Resources/UI/${MODULE_NAME}.ui
+  Resources/geometry_catalog.json
   Resources/Cohorts/cohort_schema_v1.json
   Resources/Cohorts/cohort_catalog_v1.json
   Resources/Cohorts/studies/example_cohort_v1.json
-  Resources/Cohorts/CRLM-1001/DemoScene.mrml
-  Resources/Cohorts/CRLM-1001/DemoScene.png
-  "Resources/Cohorts/CRLM-1001/CRLM-CT-1001 (CRLM-CT-1001).nrrd"
-  "Resources/Cohorts/CRLM-1001/Segmentation-CRLM-CT-1001 (CRLM-CT-1001).seg.nrrd"
-  Resources/Cohorts/CRLM-1001/Tumor.seg.nrrd
   Resources/Reproducibility/reproducibility_package_schema_v1.json
   Resources/Reproducibility/reproducibility_package_layout_v1.json
   Resources/Reproducibility/example_reviewer_package_config_v1.json
   Resources/Reproducibility/README_package_template.md
+  ${MODULE_GEOMETRY_RESOURCES}
+  ${MODULE_SAMPLE_CASE_RESOURCES}
   )
 
 #-----------------------------------------------------------------------------

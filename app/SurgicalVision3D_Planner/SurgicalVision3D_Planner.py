@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import math
+import subprocess
 import shutil
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -16,6 +17,8 @@ from xml.etree import ElementTree as ET
 import numpy as np
 import vtk
 
+import ctk
+import qt
 import slicer
 from slicer import (
     vtkMRMLMarkupsFiducialNode,
@@ -512,6 +515,17 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         self.logic: SurgicalVision3D_PlannerLogic | None = None
         self._parameterNode: SurgicalVision3D_PlannerParameterNode | None = None
         self._parameterNodeGuiTag = None
+        self._gitRepositoryRoot: Path | None = None
+        self._gitAgentLogPath: Path | None = None
+        self._gitDashboardStatusLabel = None
+        self._gitDashboardTextEdit = None
+        self._gitCommitMessageLineEdit = None
+        self._gitEntryLineEdit = None
+        self._gitRefreshButton = None
+        self._gitStageAllButton = None
+        self._gitCommitButton = None
+        self._gitPushButton = None
+        self._gitAddEntryButton = None
 
     def setup(self) -> None:
         ScriptedLoadableModuleWidget.setup(self)
@@ -521,6 +535,11 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         self.ui = slicer.util.childWidgetVariables(uiWidget)
         uiWidget.setMRMLScene(slicer.mrmlScene)
         self._configureTooltips()
+        self._createGitAgentDashboard(uiWidget)
+        self._gitRepositoryRoot = self._resolveGitRepositoryRoot()
+        if self._gitRepositoryRoot:
+            self._gitAgentLogPath = self._gitRepositoryRoot / "git_agent_log.md"
+        self._refreshGitDashboard()
 
         for selectorName in (
             "probeSegmentationSelector",
@@ -590,8 +609,196 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self.ui.packageBaseNameLineEdit.connect("textChanged(QString)", self._updateButtonStates)
         if hasattr(self.ui, "packageOutputDirectoryLineEdit"):
             self.ui.packageOutputDirectoryLineEdit.connect("textChanged(QString)", self._updateButtonStates)
+        if self._gitRefreshButton:
+            self._gitRefreshButton.connect("clicked(bool)", self.onGitRefreshDashboardButton)
+        if self._gitStageAllButton:
+            self._gitStageAllButton.connect("clicked(bool)", self.onGitStageAllButton)
+        if self._gitCommitButton:
+            self._gitCommitButton.connect("clicked(bool)", self.onGitCommitButton)
+        if self._gitPushButton:
+            self._gitPushButton.connect("clicked(bool)", self.onGitPushButton)
+        if self._gitAddEntryButton:
+            self._gitAddEntryButton.connect("clicked(bool)", self.onGitAddEntryButton)
+        if self._gitCommitMessageLineEdit:
+            self._gitCommitMessageLineEdit.connect("textChanged(QString)", self._updateButtonStates)
+        if self._gitEntryLineEdit:
+            self._gitEntryLineEdit.connect("textChanged(QString)", self._updateButtonStates)
 
         self.initializeParameterNode()
+
+    def _createGitAgentDashboard(self, uiWidget) -> None:
+        if not uiWidget or not uiWidget.layout():
+            return
+
+        gitCollapsibleButton = ctk.ctkCollapsibleButton()
+        gitCollapsibleButton.text = "Git Agent Dashboard"
+        gitFormLayout = qt.QFormLayout(gitCollapsibleButton)
+
+        self._gitDashboardStatusLabel = qt.QLabel("Initializing git dashboard...")
+        self._gitDashboardStatusLabel.wordWrap = True
+        gitFormLayout.addRow("Status:", self._gitDashboardStatusLabel)
+
+        self._gitDashboardTextEdit = qt.QPlainTextEdit()
+        self._gitDashboardTextEdit.readOnly = True
+        self._gitDashboardTextEdit.minimumHeight = 220
+        self._gitDashboardTextEdit.setLineWrapMode(qt.QPlainTextEdit.NoWrap)
+        gitFormLayout.addRow("Changes:", self._gitDashboardTextEdit)
+
+        self._gitCommitMessageLineEdit = qt.QLineEdit()
+        self._gitCommitMessageLineEdit.placeholderText = "Commit message..."
+        gitFormLayout.addRow("Commit message:", self._gitCommitMessageLineEdit)
+
+        self._gitEntryLineEdit = qt.QLineEdit()
+        self._gitEntryLineEdit.placeholderText = "Log entry (optional note for git_agent_log.md)..."
+        gitFormLayout.addRow("Agent log entry:", self._gitEntryLineEdit)
+
+        buttonRowLayout = qt.QHBoxLayout()
+        self._gitRefreshButton = qt.QPushButton("Refresh")
+        self._gitStageAllButton = qt.QPushButton("Stage All")
+        self._gitCommitButton = qt.QPushButton("Commit")
+        self._gitPushButton = qt.QPushButton("Push")
+        self._gitAddEntryButton = qt.QPushButton("Add Log Entry")
+        buttonRowLayout.addWidget(self._gitRefreshButton)
+        buttonRowLayout.addWidget(self._gitStageAllButton)
+        buttonRowLayout.addWidget(self._gitCommitButton)
+        buttonRowLayout.addWidget(self._gitPushButton)
+        buttonRowLayout.addWidget(self._gitAddEntryButton)
+        gitFormLayout.addRow(buttonRowLayout)
+
+        self._gitRefreshButton.setToolTip("Refresh branch, pending changes, and recent commits.")
+        self._gitStageAllButton.setToolTip("Stage all tracked/untracked changes using 'git add -A'.")
+        self._gitCommitButton.setToolTip("Commit staged changes with the entered message.")
+        self._gitPushButton.setToolTip("Push current branch to its configured remote/upstream.")
+        self._gitAddEntryButton.setToolTip("Append an operator note to git_agent_log.md in the repository root.")
+
+        uiWidget.layout().addWidget(gitCollapsibleButton)
+
+    def _resolveGitRepositoryRoot(self) -> Path | None:
+        startPath = Path(__file__).resolve().parent
+        for candidate in (startPath, *startPath.parents):
+            if (candidate / ".git").exists():
+                return candidate
+        return None
+
+    def _runGitCommand(self, *gitArgs: str) -> tuple[int, str, str]:
+        if not self._gitRepositoryRoot:
+            raise RuntimeError("Git repository root was not found.")
+        process = subprocess.run(
+            ["git", *gitArgs],
+            cwd=str(self._gitRepositoryRoot),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        return int(process.returncode), str(process.stdout or "").strip(), str(process.stderr or "").strip()
+
+    def _appendGitAgentLogEntry(self, action: str, details: str) -> None:
+        if not self._gitAgentLogPath:
+            return
+        timestamp = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        branch = "(unknown)"
+        try:
+            _, branchOut, _ = self._runGitCommand("rev-parse", "--abbrev-ref", "HEAD")
+            if branchOut:
+                branch = branchOut
+        except Exception:
+            pass
+        with self._gitAgentLogPath.open("a", encoding="utf-8") as logFile:
+            logFile.write(f"- {timestamp} [{branch}] {action}: {details}\n")
+
+    def _refreshGitDashboard(self) -> None:
+        if not self._gitDashboardTextEdit or not self._gitDashboardStatusLabel:
+            return
+        if not self._gitRepositoryRoot:
+            self._gitDashboardStatusLabel.text = "Git repository not found for this module path."
+            self._gitDashboardTextEdit.setPlainText("No repository context is available.")
+            self._updateButtonStates()
+            return
+
+        statusLines: list[str] = []
+        statusLines.append(f"Repository: {self._gitRepositoryRoot}")
+        statusLines.append(f"Timestamp: {datetime.utcnow().replace(microsecond=0).isoformat()}Z")
+        statusLines.append("")
+
+        _, branchOut, branchErr = self._runGitCommand("rev-parse", "--abbrev-ref", "HEAD")
+        branchName = branchOut or "(unknown)"
+        if branchErr:
+            statusLines.append(f"Branch lookup warning: {branchErr}")
+        statusLines.append(f"Branch: {branchName}")
+        statusLines.append("")
+
+        _, statusOut, statusErr = self._runGitCommand("status", "--short", "--branch")
+        statusLines.append("Pending changes:")
+        statusLines.append(statusOut if statusOut else "(clean)")
+        if statusErr:
+            statusLines.append(f"Status warning: {statusErr}")
+        statusLines.append("")
+
+        _, stagedOut, _ = self._runGitCommand("diff", "--cached", "--name-status")
+        statusLines.append("Staged files:")
+        statusLines.append(stagedOut if stagedOut else "(none)")
+        statusLines.append("")
+
+        _, recentLogOut, recentLogErr = self._runGitCommand("log", "--oneline", "-n", "5")
+        statusLines.append("Recent commits:")
+        statusLines.append(recentLogOut if recentLogOut else "(no commits)")
+        if recentLogErr:
+            statusLines.append(f"Log warning: {recentLogErr}")
+
+        if self._gitAgentLogPath and self._gitAgentLogPath.exists():
+            recentEntries = self._gitAgentLogPath.read_text(encoding="utf-8").splitlines()[-10:]
+            statusLines.append("")
+            statusLines.append("Agent log (last 10 entries):")
+            statusLines.extend(recentEntries if recentEntries else ["(empty)"])
+
+        self._gitDashboardTextEdit.setPlainText("\n".join(statusLines))
+        self._gitDashboardStatusLabel.text = f"Git dashboard ready ({branchName})."
+        self._updateButtonStates()
+
+    def onGitRefreshDashboardButton(self) -> None:
+        with slicer.util.tryWithErrorDisplay(_("Failed to refresh git dashboard."), waitCursor=False):
+            self._refreshGitDashboard()
+
+    def onGitStageAllButton(self) -> None:
+        with slicer.util.tryWithErrorDisplay(_("Failed to stage changes."), waitCursor=False):
+            code, _, stderrText = self._runGitCommand("add", "-A")
+            if code != 0:
+                raise RuntimeError(stderrText or "git add -A failed.")
+            self._appendGitAgentLogEntry("STAGE", "Staged all changes with git add -A.")
+            self._refreshGitDashboard()
+
+    def onGitCommitButton(self) -> None:
+        with slicer.util.tryWithErrorDisplay(_("Failed to commit changes."), waitCursor=False):
+            commitMessage = str(self._gitCommitMessageLineEdit.text).strip() if self._gitCommitMessageLineEdit else ""
+            if not commitMessage:
+                raise ValueError("Enter a commit message before committing.")
+            code, stdoutText, stderrText = self._runGitCommand("commit", "-m", commitMessage)
+            if code != 0:
+                combinedOutput = "\n".join([line for line in (stdoutText, stderrText) if line.strip()])
+                raise RuntimeError(combinedOutput or "git commit failed.")
+            self._appendGitAgentLogEntry("COMMIT", commitMessage)
+            if self._gitCommitMessageLineEdit:
+                self._gitCommitMessageLineEdit.text = ""
+            self._refreshGitDashboard()
+
+    def onGitPushButton(self) -> None:
+        with slicer.util.tryWithErrorDisplay(_("Failed to push changes."), waitCursor=False):
+            code, stdoutText, stderrText = self._runGitCommand("push")
+            if code != 0:
+                combinedOutput = "\n".join([line for line in (stdoutText, stderrText) if line.strip()])
+                raise RuntimeError(combinedOutput or "git push failed.")
+            self._appendGitAgentLogEntry("PUSH", "Pushed current branch to remote.")
+            self._refreshGitDashboard()
+
+    def onGitAddEntryButton(self) -> None:
+        with slicer.util.tryWithErrorDisplay(_("Failed to add git agent log entry."), waitCursor=False):
+            entryText = str(self._gitEntryLineEdit.text).strip() if self._gitEntryLineEdit else ""
+            if not entryText:
+                raise ValueError("Enter a log entry before adding it.")
+            self._appendGitAgentLogEntry("NOTE", entryText)
+            if self._gitEntryLineEdit:
+                self._gitEntryLineEdit.text = ""
+            self._refreshGitDashboard()
 
     @staticmethod
     def _configureNodeSelectorBaseName(selector, baseName: str) -> None:
@@ -1092,6 +1299,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             ):
                 if hasattr(self.ui, buttonName):
                     getattr(self.ui, buttonName).enabled = False
+            self._updateGitDashboardButtonStates()
             return
 
         self._reconcileParameterNodeState()
@@ -1144,6 +1352,22 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self.ui.loadSampleCaseButton.enabled = bool(self._selectedSampleCaseScenePath())
         if hasattr(self.ui, "generateReproducibilityPackageButton"):
             self.ui.generateReproducibilityPackageButton.enabled = bool(packageBaseName.strip())
+        self._updateGitDashboardButtonStates()
+
+    def _updateGitDashboardButtonStates(self) -> None:
+        hasRepository = bool(self._gitRepositoryRoot)
+        hasCommitMessage = bool(str(self._gitCommitMessageLineEdit.text).strip()) if self._gitCommitMessageLineEdit else False
+        hasEntryMessage = bool(str(self._gitEntryLineEdit.text).strip()) if self._gitEntryLineEdit else False
+        if self._gitRefreshButton:
+            self._gitRefreshButton.enabled = hasRepository
+        if self._gitStageAllButton:
+            self._gitStageAllButton.enabled = hasRepository
+        if self._gitCommitButton:
+            self._gitCommitButton.enabled = hasRepository and hasCommitMessage
+        if self._gitPushButton:
+            self._gitPushButton.enabled = hasRepository
+        if self._gitAddEntryButton:
+            self._gitAddEntryButton.enabled = hasRepository and hasEntryMessage
 
     def onLoadSampleCaseButton(self) -> None:
         with slicer.util.tryWithErrorDisplay(_("Failed to load sample case."), waitCursor=True):

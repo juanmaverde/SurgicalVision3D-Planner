@@ -236,6 +236,26 @@ Bundle behavior:
 - export does not mutate the current plan
 - cohort tables are included when present
 
+## 8.1 Git Agent Dashboard
+
+The module now includes a **Git Agent Dashboard** panel for repository operations directly from the UI.
+
+Supported actions:
+
+- `Refresh`: reload branch, pending changes, staged files, and recent commits
+- `Stage All`: run `git add -A`
+- `Commit`: run `git commit -m "<message>"` using the commit message field
+- `Push`: run `git push` for the current branch/upstream
+- `Add Log Entry`: append an operator note to `git_agent_log.md` in the repository root
+
+Dashboard output includes:
+
+- current repository path and branch
+- `git status --short --branch` summary
+- staged file summary
+- last 5 commits
+- last 10 entries from `git_agent_log.md` (when present)
+
 ## 9. Output Table Reference (What each table means)
 
 | Table name | Non-expert meaning | Technical meaning |

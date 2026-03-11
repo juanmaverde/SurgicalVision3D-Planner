@@ -876,11 +876,11 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         applicatorLayout = qt.QFormLayout(applicatorSection)
         self._geometryComboBox = qt.QComboBox()
         self._mamSpinBox = ctk.ctkDoubleSpinBox()
-        self._mamSpinBox.setMinimum(0.0)
-        self._mamSpinBox.setMaximum(50.0)
-        self._mamSpinBox.setDecimals(1)
-        self._mamSpinBox.setSingleStep(0.5)
-        self._mamSpinBox.setValue(10.0)
+        self._mamSpinBox.minimum = 0.0
+        self._mamSpinBox.maximum = 50.0
+        self._mamSpinBox.decimals = 1
+        self._mamSpinBox.singleStep = 0.5
+        self._mamSpinBox.value = 10.0
         self._marginAssessmentStatusLabel = self._createStatusLabel("MAM assessment not run.")
         applicatorLayout.addRow("Ablation geometry:", self._geometryComboBox)
         applicatorLayout.addRow("MAM (mm):", self._mamSpinBox)
@@ -919,7 +919,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
     def _populateBeginnerGeometryComboBox(self) -> None:
         if not self.logic or not self._geometryComboBox:
             return
-        currentGeometryId = str(self._geometryComboBox.currentData() or "")
+        currentGeometryId = str(self._geometryComboBox.itemData(self._geometryComboBox.currentIndex) or "")
         self._geometryComboBox.blockSignals(True)
         self._geometryComboBox.clear()
         for geometryEntry in self.logic.loadGeometryCatalog():
@@ -1994,7 +1994,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             return
         if self._parameterNode.masterTrajectoryLocked:
             return
-        selectedGeometryId = str(self._geometryComboBox.currentData() or "")
+        selectedGeometryId = str(self._geometryComboBox.itemData(self._geometryComboBox.currentIndex) or "")
         self._parameterNode.selectedGeometryId = selectedGeometryId
         geometryEntry = self.logic.geometryCatalogEntryById(selectedGeometryId)
         if geometryEntry is not None:

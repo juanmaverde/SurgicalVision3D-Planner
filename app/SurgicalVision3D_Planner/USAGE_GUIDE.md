@@ -22,6 +22,50 @@ The module is deterministic and conservative:
 - module-owned output nodes/tables are reused when possible
 - repeated runs with the same inputs produce stable outputs
 
+## 1.1 Beginner Branch Profile (`dev/beginner-module`)
+
+This branch now exposes a dedicated beginner workflow for **single-applicator ablation planning**.
+
+The beginner flow is linear:
+
+1. `Import Case`
+2. `Segment Structures`
+3. `Define Master Trajectory`
+4. `Validate Trajectory`
+5. `Single Applicator Plan`
+6. `Lock + Coaxial Plan`
+
+Key beginner behaviors:
+
+- import one case folder containing one main `.nrrd` volume and optional `.seg.nrrd` files
+- use **Segment Editor** for tumor and critical-structure segmentation
+- enforce exactly **one** entry point and **one** applicator endpoint
+- validate the trajectory against segmented critical structures
+- choose one predefined ablation geometry from a dropdown backed by `Resources/geometry_catalog.json`
+- predefined geometries currently use `30 mm` active-element lengths in the catalog and can be refined later by editing that JSON file
+- evaluate coverage using **Minimal Ablative Margin (MAM)** with default `10 mm`
+- color tumor-surface margins as:
+  - red: `< 0.5 x MAM`
+  - orange: `>= 0.5 x MAM` and `< MAM`
+  - green: `>= MAM`
+- lock the validated master plan before deriving coaxial guidance
+- compute coaxial guidance for `PullBack` or `PushThrough`
+
+Deferred features in this branch:
+
+- multi-applicator planning
+- automatic endpoint adaptation / optimization
+- cohort, reproducibility, export, and git dashboard workflows in the visible beginner path
+
+Quick start in beginner mode:
+
+1. Import a case folder or load a bundled sample case.
+2. Open Segment Editor and confirm tumor plus critical structures.
+3. Create exactly two trajectory points: entry first, applicator endpoint second.
+4. Validate the trajectory against critical structures.
+5. Select geometry, place the applicator, create the ablation volume, and run `Evaluate MAM`.
+6. If MAM passes, lock the master plan and compute the coaxial plan.
+
 ## 2. Terminology (Non-Expert + Technical)
 
 Use this glossary when reading the UI and outputs.

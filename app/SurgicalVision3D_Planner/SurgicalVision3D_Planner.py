@@ -63,12 +63,26 @@ GENERATED_COHORT_COMPARISON_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.
 GENERATED_REPRODUCIBILITY_PACKAGE_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedReproducibilityPackageSummaryTable"
 GENERATED_REPRODUCIBILITY_MANIFEST_PREVIEW_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedReproducibilityManifestPreviewTable"
 GENERATED_REPRODUCIBILITY_ARTIFACT_INDEX_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedReproducibilityArtifactIndexTable"
+GENERATED_MASTER_TRAJECTORY_VALIDATION_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedMasterTrajectoryValidationTable"
+GENERATED_MASTER_PLAN_SNAPSHOT_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedMasterPlanSnapshotTable"
+GENERATED_COAXIAL_PLAN_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedCoaxialPlanTable"
+GENERATED_COAXIAL_TARGET_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedCoaxialNavigationTarget"
+GENERATED_COAXIAL_LINE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedCoaxialNavigationLine"
 REFERENCE_PROBE_TEMPLATE_ATTRIBUTE = "SurgicalVision3D_Planner.ReferenceProbeTemplate"
 REFERENCE_PROBE_TEMPLATE_SOURCE_PATH_ATTRIBUTE = "SurgicalVision3D_Planner.ReferenceProbeTemplateSourcePath"
 DEFAULT_TUMOR_SEGMENTATION_NAMES = ("Tumor",)
+DEFAULT_TUMOR_SEGMENT_NAMES = ("Tumor", "tumor", "Target", "target", "Lesion", "lesion")
 DEFAULT_ENDPOINTS_MARKUPS_NAMES = ("endpoints", "Endpoints")
 DEFAULT_NATIVE_FIDUCIAL_NAMES = ("Native fiducials", "Native Fiducials", "NativeFiducials")
 DEFAULT_REGISTERED_FIDUCIAL_NAMES = ("Registered fiducials", "Registered Fiducials", "RegisteredFiducials")
+DEFAULT_CRITICAL_STRUCTURES_SEGMENTATION_NAMES = (
+    "Critical Structures",
+    "CriticalStructures",
+    "Risk Structures",
+    "RiskStructures",
+    "Structures At Risk",
+    "StructuresAtRisk",
+)
 TEMP_PROBE_MARGIN_INPUT_ATTRIBUTE = "SurgicalVision3D_Planner.TempProbeMarginInput"
 TEMP_TUMOR_MARGIN_INPUT_ATTRIBUTE = "SurgicalVision3D_Planner.TempTumorMarginInput"
 TEMP_PROBE_SAFETY_INPUT_ATTRIBUTE = "SurgicalVision3D_Planner.TempProbeSafetyInput"
@@ -100,6 +114,11 @@ COHORT_COMPARISON_SUMMARY_TABLE_NODE_NAME = "SV3D Cohort Comparison Summary"
 REPRODUCIBILITY_PACKAGE_SUMMARY_TABLE_NODE_NAME = "SV3D Reproducibility Package Summary"
 REPRODUCIBILITY_MANIFEST_PREVIEW_TABLE_NODE_NAME = "SV3D Reproducibility Manifest Preview"
 REPRODUCIBILITY_ARTIFACT_INDEX_TABLE_NODE_NAME = "SV3D Reproducibility Artifact Index"
+MASTER_TRAJECTORY_VALIDATION_TABLE_NODE_NAME = "SV3D Master Trajectory Validation"
+MASTER_PLAN_SNAPSHOT_TABLE_NODE_NAME = "SV3D Locked Master Plan"
+COAXIAL_PLAN_TABLE_NODE_NAME = "SV3D Coaxial Plan Summary"
+COAXIAL_NAVIGATION_TARGET_NODE_NAME = "SV3D Coaxial Navigation Target"
+COAXIAL_NAVIGATION_LINE_NODE_NAME = "SV3D Coaxial Navigation Line"
 TEMP_PROBE_SAFETY_MODEL_NODE_NAME = "SV3D Temp Probe Safety Input"
 TEMP_STRUCTURE_SAFETY_MODEL_NODE_NAME = "SV3D Temp Structure Safety Input"
 TEMP_STRUCTURE_SAFETY_DISTANCE_MODEL_NODE_NAME = "SV3D Temp Structure Safety Distance"
@@ -108,6 +127,14 @@ SAMPLE_DATA_CRLM1001_NAME = "CRLM-1001 Demo Scene"
 SAMPLE_DATA_CRLM1001_RELATIVE_SCENE_PATH = "Resources/Cohorts/CRLM-1001/DemoScene.mrml"
 SAMPLE_DATA_CRLM1001_RELATIVE_THUMBNAIL_PATH = "Resources/Cohorts/CRLM-1001/DemoScene.png"
 SAMPLE_DATA_ALREADY_REGISTERED = False
+BEGINNER_WORKFLOW_MODE = True
+BEGINNER_GEOMETRY_CATALOG_RELATIVE_PATH = "Resources/geometry_catalog.json"
+BEGINNER_WORKFLOW_BANNER_TEXT = (
+    "Beginner mode: import a case, define one master trajectory, validate it, assess MAM, then lock and derive coaxial guidance."
+)
+BEGINNER_MAM_COLOR_NODE_NAME = "SV3D Beginner MAM Colors"
+BEGINNER_TRAJECTORY_DISTANCE_SAMPLE_COUNT = 121
+BEGINNER_AUTO_ADAPT_PLACEHOLDER_TEXT = "Auto-adjust endpoint (later milestone)"
 
 
 def _normalize_vector(vector: Sequence[float]) -> np.ndarray:
@@ -170,6 +197,14 @@ class ProbeTrajectory:
     label: str = ""
     status: str = "pending"
     sourceControlPointIndices: tuple[int, int] | None = None
+
+
+@dataclass
+class GeometryCatalogEntry:
+    geometryId: str
+    displayName: str
+    templateRelativePath: str
+    activeElementLengthMm: float
 
 
 @dataclass
@@ -317,6 +352,35 @@ class ReproducibilityManifest:
     notes: str = ""
 
 
+@dataclass
+class LockedMasterPlanSnapshot:
+    geometryId: str
+    geometryDisplayName: str
+    mamMm: float
+    entryPointRAS: tuple[float, float, float]
+    targetPointRAS: tuple[float, float, float]
+    directionVector: tuple[float, float, float]
+    trajectoryLengthMm: float
+    activeElementLengthMm: float
+    trajectoryValidationPass: bool
+    marginValidationPass: bool
+    lockedAtISO: str
+    tumorSegmentationID: str = ""
+    tumorSegmentID: str = ""
+    tumorSegmentName: str = ""
+    endpointsMarkupsID: str = ""
+
+
+@dataclass
+class CoaxialPlanSummary:
+    technique: str
+    activeElementLengthMm: float
+    navigationTargetRAS: tuple[float, float, float]
+    masterEntryPointRAS: tuple[float, float, float]
+    masterTargetPointRAS: tuple[float, float, float]
+    notes: str = ""
+
+
 #
 # SurgicalVision3D_Planner
 #
@@ -412,9 +476,12 @@ def registerSampleData() -> None:
 
 @parameterNodeWrapper
 class SurgicalVision3D_PlannerParameterNode:
+    caseFolderPath: str = ""
+    selectedGeometryId: str = ""
     referenceProbeSegmentation: vtkMRMLSegmentationNode | None = None
     endpointsMarkups: vtkMRMLMarkupsFiducialNode | None = None
     tumorSegmentation: vtkMRMLSegmentationNode | None = None
+    criticalStructuresSegmentation: vtkMRMLSegmentationNode | None = None
     riskStructuresSegmentation: vtkMRMLSegmentationNode | None = None
     nativeFiducials: vtkMRMLMarkupsFiducialNode | None = None
     registeredFiducials: vtkMRMLMarkupsFiducialNode | None = None
@@ -422,6 +489,7 @@ class SurgicalVision3D_PlannerParameterNode:
     outputMarginModel: vtkMRMLModelNode | None = None
     resultTable: vtkMRMLTableNode | None = None
     tumorTransform: vtkMRMLTransformNode | None = None
+    coaxialNavigationTarget: vtkMRMLMarkupsFiducialNode | None = None
     trajectorySummaryTable: vtkMRMLTableNode | None = None
     planSummaryTable: vtkMRMLTableNode | None = None
     marginThresholdSummaryTable: vtkMRMLTableNode | None = None
@@ -440,9 +508,13 @@ class SurgicalVision3D_PlannerParameterNode:
     reproducibilityPackageSummaryTable: vtkMRMLTableNode | None = None
     reproducibilityManifestPreviewTable: vtkMRMLTableNode | None = None
     reproducibilityArtifactIndexTable: vtkMRMLTableNode | None = None
+    masterTrajectoryValidationTable: vtkMRMLTableNode | None = None
+    masterPlanSnapshotTable: vtkMRMLTableNode | None = None
+    coaxialPlanTable: vtkMRMLTableNode | None = None
 
     createTrajectoryLinesOnPlacement: bool = True
     clearPreviousGeneratedProbes: bool = True
+    mamMm: float = 10.0
     recolorThresholdLow: float = -10.0
     recolorThresholdMid: float = -5.0
     recolorThresholdHigh: float = -2.0
@@ -494,9 +566,15 @@ class SurgicalVision3D_PlannerParameterNode:
     packageBaseName: str = "SV3D_ReproducibilityPackage"
     packageOutputDirectory: str = ""
     lastReproducibilityPackageSequence: int = 0
+    masterTrajectoryLocked: bool = False
+    coaxialTechnique: Annotated[str, Choice(["PullBack", "PushThrough"])] = "PullBack"
 
     generatedProbeNodeIDs: str = "[]"
     generatedTrajectoryLineIDs: str = "[]"
+    trajectoryValidationSummaryJson: str = "{}"
+    mamAssessmentSummaryJson: str = "{}"
+    masterPlanSnapshotJson: str = "{}"
+    coaxialPlanSummaryJson: str = "{}"
 
 
 #
@@ -526,6 +604,25 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         self._gitCommitButton = None
         self._gitPushButton = None
         self._gitAddEntryButton = None
+        self._gitDashboardCollapsibleButton = None
+        self._beginnerModeBannerLabel = None
+        self._beginnerWorkflowSections: list[ctk.ctkCollapsibleButton] = []
+        self._caseFolderLineEdit = None
+        self._browseCaseFolderButton = None
+        self._importCaseFolderButton = None
+        self._openSegmentEditorButton = None
+        self._geometryComboBox = None
+        self._mamSpinBox = None
+        self._validateTrajectoryButton = None
+        self._trajectoryValidationStatusLabel = None
+        self._segmentEditorStatusLabel = None
+        self._marginAssessmentStatusLabel = None
+        self._lockMasterPlanButton = None
+        self._resetMasterPlanButton = None
+        self._coaxialTechniqueComboBox = None
+        self._computeCoaxialPlanButton = None
+        self._coaxialStatusLabel = None
+        self._autoAdaptPlaceholderButton = None
 
     def setup(self) -> None:
         ScriptedLoadableModuleWidget.setup(self)
@@ -540,6 +637,9 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         if self._gitRepositoryRoot:
             self._gitAgentLogPath = self._gitRepositoryRoot / "git_agent_log.md"
         self._refreshGitDashboard()
+        self._createBeginnerWorkflowUi(uiWidget)
+        self._applyBeginnerWorkflowMode(uiWidget)
+        self._configureBeginnerTooltips()
 
         for selectorName in (
             "probeSegmentationSelector",
@@ -563,6 +663,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         self.logic = SurgicalVision3D_PlannerLogic()
         self.logic.ensureReferenceProbeTemplatesLoaded()
         self._populateSampleCaseComboBox()
+        self._populateBeginnerGeometryComboBox()
 
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneStartClose)
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
@@ -623,6 +724,28 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self._gitCommitMessageLineEdit.connect("textChanged(QString)", self._updateButtonStates)
         if self._gitEntryLineEdit:
             self._gitEntryLineEdit.connect("textChanged(QString)", self._updateButtonStates)
+        if self._browseCaseFolderButton:
+            self._browseCaseFolderButton.connect("clicked(bool)", self.onBrowseCaseFolderButton)
+        if self._importCaseFolderButton:
+            self._importCaseFolderButton.connect("clicked(bool)", self.onImportCaseFolderButton)
+        if self._caseFolderLineEdit:
+            self._caseFolderLineEdit.connect("textChanged(QString)", self.onCaseFolderPathChanged)
+        if self._openSegmentEditorButton:
+            self._openSegmentEditorButton.connect("clicked(bool)", self.onOpenSegmentEditorButton)
+        if self._geometryComboBox:
+            self._geometryComboBox.connect("currentIndexChanged(int)", self.onSelectedGeometryChanged)
+        if self._mamSpinBox:
+            self._mamSpinBox.connect("valueChanged(double)", self.onMamValueChanged)
+        if self._validateTrajectoryButton:
+            self._validateTrajectoryButton.connect("clicked(bool)", self.onValidateTrajectoryButton)
+        if self._lockMasterPlanButton:
+            self._lockMasterPlanButton.connect("clicked(bool)", self.onLockMasterPlanButton)
+        if self._resetMasterPlanButton:
+            self._resetMasterPlanButton.connect("clicked(bool)", self.onResetMasterPlanButton)
+        if self._coaxialTechniqueComboBox:
+            self._coaxialTechniqueComboBox.connect("currentIndexChanged(int)", self.onCoaxialTechniqueChanged)
+        if self._computeCoaxialPlanButton:
+            self._computeCoaxialPlanButton.connect("clicked(bool)", self.onComputeCoaxialPlanButton)
 
         self.initializeParameterNode()
 
@@ -631,6 +754,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             return
 
         gitCollapsibleButton = ctk.ctkCollapsibleButton()
+        self._gitDashboardCollapsibleButton = gitCollapsibleButton
         gitCollapsibleButton.text = "Git Agent Dashboard"
         gitFormLayout = qt.QFormLayout(gitCollapsibleButton)
 
@@ -672,6 +796,139 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         self._gitAddEntryButton.setToolTip("Append an operator note to git_agent_log.md in the repository root.")
 
         uiWidget.layout().addWidget(gitCollapsibleButton)
+
+    @staticmethod
+    def _buildButtonRowWidget(*widgets) -> qt.QWidget:
+        rowWidget = qt.QWidget()
+        rowLayout = qt.QHBoxLayout(rowWidget)
+        rowLayout.setContentsMargins(0, 0, 0, 0)
+        for widget in widgets:
+            if widget:
+                rowLayout.addWidget(widget)
+        rowLayout.addStretch(1)
+        return rowWidget
+
+    @staticmethod
+    def _createStatusLabel(initialText: str) -> qt.QLabel:
+        label = qt.QLabel(initialText)
+        label.wordWrap = True
+        return label
+
+    def _createBeginnerWorkflowUi(self, uiWidget) -> None:
+        if not BEGINNER_WORKFLOW_MODE or not uiWidget or not uiWidget.layout() or len(self._beginnerWorkflowSections) > 0:
+            return
+
+        importSection = ctk.ctkCollapsibleButton()
+        importSection.text = "Step 1 - Import Case"
+        importLayout = qt.QFormLayout(importSection)
+
+        caseFolderRow = qt.QWidget()
+        caseFolderLayout = qt.QHBoxLayout(caseFolderRow)
+        caseFolderLayout.setContentsMargins(0, 0, 0, 0)
+        self._caseFolderLineEdit = qt.QLineEdit()
+        self._caseFolderLineEdit.placeholderText = "Select a case folder containing .nrrd / .seg.nrrd files"
+        self._browseCaseFolderButton = qt.QPushButton("Browse")
+        self._importCaseFolderButton = qt.QPushButton("Import")
+        caseFolderLayout.addWidget(self._caseFolderLineEdit)
+        caseFolderLayout.addWidget(self._browseCaseFolderButton)
+        caseFolderLayout.addWidget(self._importCaseFolderButton)
+        importLayout.addRow("Case folder:", caseFolderRow)
+        importLayout.addRow("Bundled sample:", self._buildButtonRowWidget(self.ui.sampleCaseComboBox, self.ui.loadSampleCaseButton))
+
+        segmentationSection = ctk.ctkCollapsibleButton()
+        segmentationSection.text = "Step 2 - Segment Structures"
+        segmentationLayout = qt.QFormLayout(segmentationSection)
+        self._openSegmentEditorButton = qt.QPushButton("Open Segment Editor")
+        self._segmentEditorStatusLabel = self._createStatusLabel(
+            "Segment the tumor and critical structures in Segment Editor, then return to this module."
+        )
+        segmentationLayout.addRow("Tumor segmentation:", self.ui.tumorSegmentationSelector)
+        segmentationLayout.addRow("Critical structures:", self.ui.riskStructuresSegmentationSelector)
+        segmentationLayout.addRow("Native fiducials:", self.ui.nativeFiducialsSelector)
+        segmentationLayout.addRow("Registered fiducials:", self.ui.registeredFiducialsSelector)
+        segmentationLayout.addRow("Segment Editor:", self._openSegmentEditorButton)
+        segmentationLayout.addRow("Registration:", self._buildButtonRowWidget(self.ui.registerTumorButton, self.ui.hardenTumorTransformButton))
+        segmentationLayout.addRow("Status:", self._segmentEditorStatusLabel)
+
+        trajectorySection = ctk.ctkCollapsibleButton()
+        trajectorySection.text = "Step 3 - Define Master Trajectory"
+        trajectoryLayout = qt.QFormLayout(trajectorySection)
+        trajectoryInstructionLabel = self._createStatusLabel(
+            "Use exactly two points in the markups node: entry point first, applicator endpoint second."
+        )
+        trajectoryLayout.addRow("Endpoint markups:", self.ui.endpointsMarkupsSelector)
+        trajectoryLayout.addRow("Instruction:", trajectoryInstructionLabel)
+        trajectoryLayout.addRow("Preview:", self._buildButtonRowWidget(self.ui.createTrajectoryLinesButton))
+
+        validationSection = ctk.ctkCollapsibleButton()
+        validationSection.text = "Step 4 - Validate Trajectory"
+        validationLayout = qt.QFormLayout(validationSection)
+        self._validateTrajectoryButton = qt.QPushButton("Validate Against Critical Structures")
+        self._trajectoryValidationStatusLabel = self._createStatusLabel("Trajectory not validated.")
+        self._autoAdaptPlaceholderButton = qt.QPushButton(BEGINNER_AUTO_ADAPT_PLACEHOLDER_TEXT)
+        self._autoAdaptPlaceholderButton.enabled = False
+        validationLayout.addRow("Validation:", self._validateTrajectoryButton)
+        validationLayout.addRow("Status:", self._trajectoryValidationStatusLabel)
+        validationLayout.addRow("Later:", self._autoAdaptPlaceholderButton)
+
+        applicatorSection = ctk.ctkCollapsibleButton()
+        applicatorSection.text = "Step 5 - Single Applicator Plan"
+        applicatorLayout = qt.QFormLayout(applicatorSection)
+        self._geometryComboBox = qt.QComboBox()
+        self._mamSpinBox = ctk.ctkDoubleSpinBox()
+        self._mamSpinBox.setMinimum(0.0)
+        self._mamSpinBox.setMaximum(50.0)
+        self._mamSpinBox.setDecimals(1)
+        self._mamSpinBox.setSingleStep(0.5)
+        self._mamSpinBox.setValue(10.0)
+        self._marginAssessmentStatusLabel = self._createStatusLabel("MAM assessment not run.")
+        applicatorLayout.addRow("Ablation geometry:", self._geometryComboBox)
+        applicatorLayout.addRow("MAM (mm):", self._mamSpinBox)
+        applicatorLayout.addRow(
+            "Planning:",
+            self._buildButtonRowWidget(self.ui.placeProbesButton, self.ui.mergeTranslatedProbesButton, self.ui.evaluateMarginsButton),
+        )
+        applicatorLayout.addRow("Status:", self._marginAssessmentStatusLabel)
+
+        lockSection = ctk.ctkCollapsibleButton()
+        lockSection.text = "Step 6 - Lock + Coaxial Plan"
+        lockLayout = qt.QFormLayout(lockSection)
+        self._lockMasterPlanButton = qt.QPushButton("Lock Validated Master Plan")
+        self._resetMasterPlanButton = qt.QPushButton("Reset Lock")
+        self._coaxialTechniqueComboBox = qt.QComboBox()
+        self._coaxialTechniqueComboBox.addItem("PullBack")
+        self._coaxialTechniqueComboBox.addItem("PushThrough")
+        self._computeCoaxialPlanButton = qt.QPushButton("Compute Coaxial Plan")
+        self._coaxialStatusLabel = self._createStatusLabel("Coaxial plan not computed.")
+        lockLayout.addRow("Locking:", self._buildButtonRowWidget(self._lockMasterPlanButton, self._resetMasterPlanButton))
+        lockLayout.addRow("Technique:", self._coaxialTechniqueComboBox)
+        lockLayout.addRow("Coaxial plan:", self._computeCoaxialPlanButton)
+        lockLayout.addRow("Status:", self._coaxialStatusLabel)
+
+        self._beginnerWorkflowSections = [
+            importSection,
+            segmentationSection,
+            trajectorySection,
+            validationSection,
+            applicatorSection,
+            lockSection,
+        ]
+        for section in reversed(self._beginnerWorkflowSections):
+            uiWidget.layout().insertWidget(0, section)
+
+    def _populateBeginnerGeometryComboBox(self) -> None:
+        if not self.logic or not self._geometryComboBox:
+            return
+        currentGeometryId = str(self._geometryComboBox.currentData() or "")
+        self._geometryComboBox.blockSignals(True)
+        self._geometryComboBox.clear()
+        for geometryEntry in self.logic.loadGeometryCatalog():
+            self._geometryComboBox.addItem(geometryEntry.displayName, geometryEntry.geometryId)
+        if self._geometryComboBox.count > 0:
+            targetGeometryId = currentGeometryId or str(self._geometryComboBox.itemData(0) or "")
+            targetIndex = self._geometryComboBox.findData(targetGeometryId)
+            self._geometryComboBox.currentIndex = targetIndex if targetIndex >= 0 else 0
+        self._geometryComboBox.blockSignals(False)
 
     def _resolveGitRepositoryRoot(self) -> Path | None:
         startPath = Path(__file__).resolve().parent
@@ -862,6 +1119,144 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             return ""
         return str(sampleCaseComboBox.itemData(sampleCaseComboBox.currentIndex) or "")
 
+    def _syncBeginnerWidgetsFromParameterNode(self) -> None:
+        if not self._parameterNode:
+            return
+
+        if self._caseFolderLineEdit and str(self._caseFolderLineEdit.text) != str(self._parameterNode.caseFolderPath or ""):
+            self._caseFolderLineEdit.blockSignals(True)
+            self._caseFolderLineEdit.text = str(self._parameterNode.caseFolderPath or "")
+            self._caseFolderLineEdit.blockSignals(False)
+
+        if self._mamSpinBox and not math.isclose(float(self._mamSpinBox.value), float(self._parameterNode.mamMm), abs_tol=1e-6):
+            self._mamSpinBox.blockSignals(True)
+            self._mamSpinBox.value = float(self._parameterNode.mamMm)
+            self._mamSpinBox.blockSignals(False)
+
+        if self._coaxialTechniqueComboBox:
+            targetTechnique = str(self._parameterNode.coaxialTechnique or "PullBack")
+            targetIndex = self._coaxialTechniqueComboBox.findText(targetTechnique)
+            if targetIndex >= 0 and targetIndex != self._coaxialTechniqueComboBox.currentIndex:
+                self._coaxialTechniqueComboBox.blockSignals(True)
+                self._coaxialTechniqueComboBox.currentIndex = targetIndex
+                self._coaxialTechniqueComboBox.blockSignals(False)
+
+        if self._geometryComboBox:
+            targetGeometryId = str(self._parameterNode.selectedGeometryId or "")
+            if not targetGeometryId and self._geometryComboBox.count > 0:
+                targetGeometryId = str(self._geometryComboBox.itemData(0) or "")
+            if targetGeometryId:
+                targetIndex = self._geometryComboBox.findData(targetGeometryId)
+                if targetIndex >= 0 and targetIndex != self._geometryComboBox.currentIndex:
+                    self._geometryComboBox.blockSignals(True)
+                    self._geometryComboBox.currentIndex = targetIndex
+                    self._geometryComboBox.blockSignals(False)
+
+        trajectorySummary = self._jsonSummary(self._parameterNode.trajectoryValidationSummaryJson)
+        if self._trajectoryValidationStatusLabel:
+            self._trajectoryValidationStatusLabel.text = str(
+                trajectorySummary.get("StatusText", "Trajectory not validated.")
+            )
+        mamSummary = self._jsonSummary(self._parameterNode.mamAssessmentSummaryJson)
+        if self._marginAssessmentStatusLabel:
+            self._marginAssessmentStatusLabel.text = str(
+                mamSummary.get("StatusText", "MAM assessment not run.")
+            )
+        coaxialSummary = self._jsonSummary(self._parameterNode.coaxialPlanSummaryJson)
+        if self._coaxialStatusLabel:
+            self._coaxialStatusLabel.text = str(
+                coaxialSummary.get("notes", "Coaxial plan not computed.")
+            )
+
+    @staticmethod
+    def _setWidgetVisible(widget, visible: bool) -> None:
+        if widget and hasattr(widget, "setVisible"):
+            widget.setVisible(bool(visible))
+
+    def _setUiWidgetsVisible(self, widgetNames: Sequence[str], visible: bool) -> None:
+        for widgetName in widgetNames:
+            self._setWidgetVisible(getattr(self.ui, widgetName, None), visible)
+
+    def _applyBeginnerWorkflowMode(self, uiWidget) -> None:
+        if not BEGINNER_WORKFLOW_MODE:
+            return
+
+        if uiWidget and uiWidget.layout() and not self._beginnerModeBannerLabel:
+            self._beginnerModeBannerLabel = qt.QLabel(BEGINNER_WORKFLOW_BANNER_TEXT)
+            self._beginnerModeBannerLabel.wordWrap = True
+            self._beginnerModeBannerLabel.setStyleSheet(
+                "QLabel { background: #f4f8ff; border: 1px solid #bccce6; border-radius: 4px; padding: 6px; }"
+            )
+            uiWidget.layout().insertWidget(0, self._beginnerModeBannerLabel)
+
+        # Hide the original module sections; the beginner workflow reuses the widgets inside new step panels.
+        self._setUiWidgetsVisible(
+            (
+                "inputsCollapsibleButton",
+                "registrationCollapsibleButton",
+                "evaluationCollapsibleButton",
+                "cohortCollapsibleButton",
+                "reproducibilityCollapsibleButton",
+                "exportCollapsibleButton",
+            ),
+            False,
+        )
+        self._setWidgetVisible(self._gitDashboardCollapsibleButton, False)
+        self._setUiWidgetsVisible(
+            (
+                "recolorThresholdLowLabel",
+                "recolorThresholdLowSpinBox",
+                "recolorThresholdMidLabel",
+                "recolorThresholdMidSpinBox",
+                "recolorThresholdHighLabel",
+                "recolorThresholdHighSpinBox",
+                "recolorMarginsButton",
+                "resetMarginColorsButton",
+                "coordinationSectionLabel",
+                "minInterProbeDistanceLabel",
+                "minInterProbeDistanceSpinBox",
+                "maxInterProbeDistanceLabel",
+                "maxInterProbeDistanceSpinBox",
+                "minEntryPointSpacingLabel",
+                "minEntryPointSpacingSpinBox",
+                "minTargetPointSpacingLabel",
+                "minTargetPointSpacingSpinBox",
+                "maxParallelAngleLabel",
+                "maxParallelAngleSpinBox",
+                "maxOverlapRedundancyLabel",
+                "maxOverlapRedundancySpinBox",
+                "requireAllPairsLabel",
+                "requireAllProbePairsFeasibleCheckBox",
+                "enableNoTouchCheckLabel",
+                "enableNoTouchCheckBox",
+                "enableInterProbeDistanceRuleLabel",
+                "enableInterProbeDistanceRuleCheckBox",
+                "enableEntrySpacingRuleLabel",
+                "enableEntrySpacingRuleCheckBox",
+                "enableTargetSpacingRuleLabel",
+                "enableTargetSpacingRuleCheckBox",
+                "enableAngleRuleLabel",
+                "enableAngleRuleCheckBox",
+                "enableOverlapRuleLabel",
+                "enableOverlapRuleCheckBox",
+                "evaluateProbeCoordinationButton",
+                "probeCoordinationStatusLabel",
+            ),
+            False,
+        )
+        if hasattr(self.ui, "placeProbesButton"):
+            self.ui.placeProbesButton.text = "Place Single Applicator"
+        if hasattr(self.ui, "mergeTranslatedProbesButton"):
+            self.ui.mergeTranslatedProbesButton.text = "Create Ablation Volume"
+        if hasattr(self.ui, "evaluateMarginsButton"):
+            self.ui.evaluateMarginsButton.text = "Evaluate MAM"
+        if hasattr(self.ui, "createTrajectoryLinesButton"):
+            self.ui.createTrajectoryLinesButton.text = "Preview Master Trajectory"
+        if hasattr(self.ui, "registerTumorButton"):
+            self.ui.registerTumorButton.text = "Apply Fiducial Registration"
+        if hasattr(self.ui, "hardenTumorTransformButton"):
+            self.ui.hardenTumorTransformButton.text = "Harden Registration"
+
     def _configureTooltips(self) -> None:
         tooltipsByWidgetName: dict[str, str] = {
             "sampleCaseComboBox": "Select a bundled sample scene and click Load to open it in the current Slicer session.",
@@ -979,6 +1374,48 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             if widget and hasattr(widget, "setToolTip"):
                 widget.setToolTip(tooltipText)
 
+    def _configureBeginnerTooltips(self) -> None:
+        if not BEGINNER_WORKFLOW_MODE:
+            return
+        beginnerTooltipsByWidgetName: dict[str, str] = {
+            "sampleCaseComboBox": "Pick a sample case first, then click Load.",
+            "loadSampleCaseButton": "Load the selected sample scene.",
+            "probeSegmentationSelector": "Choose the probe template geometry to place on each trajectory.",
+            "endpointsMarkupsSelector": "Choose exactly two points: entry first, applicator endpoint second.",
+            "tumorSegmentationSelector": "Choose the target tumor segmentation for margin evaluation.",
+            "riskStructuresSegmentationSelector": "Choose the segmentation that contains the critical structures to avoid.",
+            "placeProbesButton": "Create probe instances from endpoint pairs.",
+            "mergeTranslatedProbesButton": "Union the placed probes into one combined ablation zone.",
+            "evaluateMarginsButton": "Compute signed margins between the target tumor and the combined ablation zone.",
+            "createTrajectoryLinesButton": "Preview the current single master trajectory as a line.",
+            "registerTumorButton": "Apply fiducial-based rigid registration to the tumor segmentation.",
+            "hardenTumorTransformButton": "Make the current tumor registration permanent.",
+        }
+        for widgetName, tooltipText in beginnerTooltipsByWidgetName.items():
+            widget = getattr(self.ui, widgetName, None)
+            if widget and hasattr(widget, "setToolTip"):
+                widget.setToolTip(tooltipText)
+        if self._browseCaseFolderButton:
+            self._browseCaseFolderButton.setToolTip("Browse to a case folder containing one main .nrrd file and optional .seg.nrrd files.")
+        if self._importCaseFolderButton:
+            self._importCaseFolderButton.setToolTip("Import the selected case folder into the current Slicer scene.")
+        if self._openSegmentEditorButton:
+            self._openSegmentEditorButton.setToolTip("Open Slicer Segment Editor to create or refine tumor and critical-structure segments.")
+        if self._geometryComboBox:
+            self._geometryComboBox.setToolTip("Choose a predefined ablation geometry. Each entry also defines the active-element length.")
+        if self._mamSpinBox:
+            self._mamSpinBox.setToolTip("Minimal Ablative Margin in mm. Default is 10 mm.")
+        if self._validateTrajectoryButton:
+            self._validateTrajectoryButton.setToolTip("Check whether the master trajectory intersects any critical-structure segment.")
+        if self._lockMasterPlanButton:
+            self._lockMasterPlanButton.setToolTip("Lock the current validated master trajectory and save its snapshot.")
+        if self._resetMasterPlanButton:
+            self._resetMasterPlanButton.setToolTip("Unlock the master plan and clear the saved lock/coaxial outputs.")
+        if self._coaxialTechniqueComboBox:
+            self._coaxialTechniqueComboBox.setToolTip("Choose how the coaxial sheath and applicator are coordinated.")
+        if self._computeCoaxialPlanButton:
+            self._computeCoaxialPlanButton.setToolTip("Derive the coaxial navigation target for the selected technique.")
+
     def cleanup(self) -> None:
         self.removeObservers()
 
@@ -1016,6 +1453,8 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             parameterNode.referenceProbeSegmentation = None
         if not parameterNode.referenceProbeSegmentation and len(templateNodes) > 0:
             parameterNode.referenceProbeSegmentation = templateNodes[0]
+        if not parameterNode.selectedGeometryId and self._geometryComboBox and self._geometryComboBox.count > 0:
+            parameterNode.selectedGeometryId = str(self._geometryComboBox.itemData(0) or "")
         self.setParameterNode(parameterNode)
 
     def _preloadNamedSceneInputs(self, parameterNode: SurgicalVision3D_PlannerParameterNode) -> None:
@@ -1029,6 +1468,24 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             )
             if tumorSegmentation:
                 parameterNode.tumorSegmentation = tumorSegmentation
+
+        if not parameterNode.criticalStructuresSegmentation:
+            criticalStructuresSegmentation = self.logic.findFirstNodeByClassAndPreferredNames(
+                "vtkMRMLSegmentationNode",
+                DEFAULT_CRITICAL_STRUCTURES_SEGMENTATION_NAMES,
+            )
+            if criticalStructuresSegmentation:
+                parameterNode.criticalStructuresSegmentation = criticalStructuresSegmentation
+            elif parameterNode.tumorSegmentation and self.logic.segmentationSegmentCount(parameterNode.tumorSegmentation) > 1:
+                parameterNode.criticalStructuresSegmentation = parameterNode.tumorSegmentation
+            else:
+                for segmentationNode in slicer.util.getNodesByClass("vtkMRMLSegmentationNode"):
+                    if parameterNode.tumorSegmentation and segmentationNode.GetID() == parameterNode.tumorSegmentation.GetID():
+                        continue
+                    parameterNode.criticalStructuresSegmentation = segmentationNode
+                    break
+        if not parameterNode.riskStructuresSegmentation and parameterNode.criticalStructuresSegmentation:
+            parameterNode.riskStructuresSegmentation = parameterNode.criticalStructuresSegmentation
 
         endpointMarkups = self.logic.findFirstNodeByClassAndPreferredNames(
             "vtkMRMLMarkupsFiducialNode",
@@ -1081,6 +1538,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self._syncExportWidgetsFromParameterNode()
             self._syncCohortWidgetsFromParameterNode()
             self._syncReproducibilityWidgetsFromParameterNode()
+            self._syncBeginnerWidgetsFromParameterNode()
             self._updateButtonStates()
 
     def _syncExportWidgetsFromParameterNode(self) -> None:
@@ -1137,12 +1595,18 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self._parameterNode.generatedProbeNodeIDs = serializedProbeNodeIDs
         if serializedLineNodeIDs != self._parameterNode.generatedTrajectoryLineIDs:
             self._parameterNode.generatedTrajectoryLineIDs = serializedLineNodeIDs
+        if self._parameterNode.criticalStructuresSegmentation and self._parameterNode.riskStructuresSegmentation is not self._parameterNode.criticalStructuresSegmentation:
+            self._parameterNode.riskStructuresSegmentation = self._parameterNode.criticalStructuresSegmentation
+        elif self._parameterNode.riskStructuresSegmentation and not self._parameterNode.criticalStructuresSegmentation:
+            self._parameterNode.criticalStructuresSegmentation = self._parameterNode.riskStructuresSegmentation
 
         for nodeFieldName in (
+            "criticalStructuresSegmentation",
             "combinedProbeSegmentation",
             "outputMarginModel",
             "resultTable",
             "tumorTransform",
+            "coaxialNavigationTarget",
             "riskStructuresSegmentation",
             "trajectorySummaryTable",
             "planSummaryTable",
@@ -1162,6 +1626,9 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             "reproducibilityPackageSummaryTable",
             "reproducibilityManifestPreviewTable",
             "reproducibilityArtifactIndexTable",
+            "masterTrajectoryValidationTable",
+            "masterPlanSnapshotTable",
+            "coaxialPlanTable",
         ):
             node = getattr(self._parameterNode, nodeFieldName)
             if node and not slicer.mrmlScene.IsNodePresent(node):
@@ -1253,6 +1720,49 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         if clearReferences and hasattr(self.ui, "cohortStatusLabel"):
             self.ui.cohortStatusLabel.text = "Cohort evaluation not run."
 
+    def _clearOwnedBeginnerOutputs(self, clearReferences: bool = False, unlockPlan: bool = False) -> None:
+        if not self.logic or not self._parameterNode:
+            return
+
+        if self.logic.removeNodeIfOwned(
+            self._parameterNode.masterTrajectoryValidationTable,
+            GENERATED_MASTER_TRAJECTORY_VALIDATION_TABLE_ATTRIBUTE,
+        ) or clearReferences:
+            self._parameterNode.masterTrajectoryValidationTable = None
+        if self.logic.removeNodeIfOwned(
+            self._parameterNode.masterPlanSnapshotTable,
+            GENERATED_MASTER_PLAN_SNAPSHOT_TABLE_ATTRIBUTE,
+        ) or clearReferences:
+            self._parameterNode.masterPlanSnapshotTable = None
+        if self.logic.removeNodeIfOwned(
+            self._parameterNode.coaxialPlanTable,
+            GENERATED_COAXIAL_PLAN_TABLE_ATTRIBUTE,
+        ) or clearReferences:
+            self._parameterNode.coaxialPlanTable = None
+        if self.logic.removeNodeIfOwned(
+            self._parameterNode.coaxialNavigationTarget,
+            GENERATED_COAXIAL_TARGET_ATTRIBUTE,
+        ) or clearReferences:
+            self._parameterNode.coaxialNavigationTarget = None
+        if self.logic:
+            self.logic.removeNodesByAttribute("vtkMRMLMarkupsLineNode", GENERATED_COAXIAL_LINE_ATTRIBUTE)
+
+        self._parameterNode.trajectoryValidationSummaryJson = "{}"
+        self._parameterNode.mamAssessmentSummaryJson = "{}"
+        self._parameterNode.masterPlanSnapshotJson = "{}"
+        self._parameterNode.coaxialPlanSummaryJson = "{}"
+        if unlockPlan:
+            self._parameterNode.masterTrajectoryLocked = False
+            self._setMasterTrajectoryLocked(False)
+
+        if clearReferences:
+            if self._trajectoryValidationStatusLabel:
+                self._trajectoryValidationStatusLabel.text = "Trajectory not validated."
+            if self._marginAssessmentStatusLabel:
+                self._marginAssessmentStatusLabel.text = "MAM assessment not run."
+            if self._coaxialStatusLabel:
+                self._coaxialStatusLabel.text = "Coaxial plan not computed."
+
     def _clearOwnedDerivedOutputs(self, clearReferences: bool = False) -> None:
         if not self.logic or not self._parameterNode:
             return
@@ -1278,6 +1788,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         self._clearOwnedSafetyOutputs(clearReferences=clearReferences)
         self._clearOwnedCoordinationOutputs(clearReferences=clearReferences)
         self._clearOwnedCohortOutputs(clearReferences=clearReferences)
+        self._clearOwnedBeginnerOutputs(clearReferences=clearReferences)
 
     def _updateButtonStates(self, caller=None, event=None) -> None:
         if not self._parameterNode:
@@ -1299,28 +1810,48 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             ):
                 if hasattr(self.ui, buttonName):
                     getattr(self.ui, buttonName).enabled = False
+            for widget in (
+                self._browseCaseFolderButton,
+                self._importCaseFolderButton,
+                self._openSegmentEditorButton,
+                self._validateTrajectoryButton,
+                self._lockMasterPlanButton,
+                self._resetMasterPlanButton,
+                self._computeCoaxialPlanButton,
+            ):
+                if widget:
+                    widget.enabled = False
             self._updateGitDashboardButtonStates()
             return
 
         self._reconcileParameterNodeState()
+        self._syncBeginnerWidgetsFromParameterNode()
 
         hasProbeAndEndpoints = bool(self._parameterNode.referenceProbeSegmentation and self._parameterNode.endpointsMarkups)
         generatedProbeNodeIDs = self.logic.deserializeNodeIDs(self._parameterNode.generatedProbeNodeIDs) if self.logic else []
         hasGeneratedProbes = len(generatedProbeNodeIDs) > 0
+        hasSingleGeneratedProbe = len(generatedProbeNodeIDs) == 1
         hasCombinedProbe = self._parameterNode.combinedProbeSegmentation is not None
         hasTumor = self._parameterNode.tumorSegmentation is not None
+        hasCriticalStructures = self._parameterNode.criticalStructuresSegmentation is not None
         hasRegistrationInputs = bool(self._parameterNode.tumorSegmentation and self._parameterNode.nativeFiducials and self._parameterNode.registeredFiducials)
         hasMarginModel = self._parameterNode.outputMarginModel is not None
         hasTumorTransform = bool(self._parameterNode.tumorSegmentation and self._parameterNode.tumorSegmentation.GetTransformNodeID())
         endpointControlPointCount = int(self._parameterNode.endpointsMarkups.GetNumberOfControlPoints()) if self._parameterNode.endpointsMarkups else 0
         hasEvenEndpointPairs = endpointControlPointCount >= 2 and endpointControlPointCount % 2 == 0
+        hasSingleMasterTrajectory = endpointControlPointCount == 2
+        isLocked = bool(self._parameterNode.masterTrajectoryLocked)
+        trajectoryValidationSummary = self._jsonSummary(self._parameterNode.trajectoryValidationSummaryJson)
+        mamAssessmentSummary = self._jsonSummary(self._parameterNode.mamAssessmentSummaryJson)
+        trajectoryValidationPass = bool(trajectoryValidationSummary.get("TrajectoryPass", False))
+        mamValidationPass = bool(mamAssessmentSummary.get("MamPass", False))
 
-        self.ui.placeProbesButton.enabled = hasProbeAndEndpoints
-        self.ui.createTrajectoryLinesButton.enabled = self._parameterNode.endpointsMarkups is not None
-        self.ui.mergeTranslatedProbesButton.enabled = hasGeneratedProbes
+        self.ui.placeProbesButton.enabled = hasProbeAndEndpoints and hasSingleMasterTrajectory and not isLocked
+        self.ui.createTrajectoryLinesButton.enabled = hasSingleMasterTrajectory and not isLocked
+        self.ui.mergeTranslatedProbesButton.enabled = hasGeneratedProbes and (hasSingleGeneratedProbe or not BEGINNER_WORKFLOW_MODE) and not isLocked
         self.ui.registerTumorButton.enabled = hasRegistrationInputs
         self.ui.hardenTumorTransformButton.enabled = hasTumorTransform
-        self.ui.evaluateMarginsButton.enabled = hasTumor and (hasCombinedProbe or hasGeneratedProbes)
+        self.ui.evaluateMarginsButton.enabled = hasTumor and hasSingleMasterTrajectory and (hasCombinedProbe or hasGeneratedProbes) and not isLocked
         self.ui.recolorMarginsButton.enabled = hasMarginModel
         self.ui.resetMarginColorsButton.enabled = hasMarginModel
         self.ui.evaluateProbeCoordinationButton.enabled = hasEvenEndpointPairs
@@ -1352,6 +1883,26 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self.ui.loadSampleCaseButton.enabled = bool(self._selectedSampleCaseScenePath())
         if hasattr(self.ui, "generateReproducibilityPackageButton"):
             self.ui.generateReproducibilityPackageButton.enabled = bool(packageBaseName.strip())
+        if self._browseCaseFolderButton:
+            self._browseCaseFolderButton.enabled = True
+        if self._importCaseFolderButton:
+            self._importCaseFolderButton.enabled = bool(str(self._caseFolderLineEdit.text).strip()) if self._caseFolderLineEdit else False
+        if self._openSegmentEditorButton:
+            self._openSegmentEditorButton.enabled = True
+        if self._geometryComboBox:
+            self._geometryComboBox.enabled = not isLocked
+        if self._mamSpinBox:
+            self._mamSpinBox.enabled = not isLocked
+        if hasattr(self.ui, "endpointsMarkupsSelector"):
+            self.ui.endpointsMarkupsSelector.enabled = not isLocked
+        if self._validateTrajectoryButton:
+            self._validateTrajectoryButton.enabled = hasSingleMasterTrajectory and hasCriticalStructures and not isLocked
+        if self._lockMasterPlanButton:
+            self._lockMasterPlanButton.enabled = (trajectoryValidationPass and mamValidationPass and not isLocked)
+        if self._resetMasterPlanButton:
+            self._resetMasterPlanButton.enabled = isLocked
+        if self._computeCoaxialPlanButton:
+            self._computeCoaxialPlanButton.enabled = isLocked and bool(str(self._parameterNode.masterPlanSnapshotJson or "{}").strip())
         self._updateGitDashboardButtonStates()
 
     def _updateGitDashboardButtonStates(self) -> None:
@@ -1369,6 +1920,242 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         if self._gitAddEntryButton:
             self._gitAddEntryButton.enabled = hasRepository and hasEntryMessage
 
+    @staticmethod
+    def _jsonSummary(serializedValue: str | None) -> dict[str, Any]:
+        try:
+            loadedValue = json.loads(str(serializedValue or "{}"))
+        except Exception:
+            return {}
+        return loadedValue if isinstance(loadedValue, dict) else {}
+
+    def _setMasterTrajectoryLocked(self, locked: bool) -> None:
+        if not self._parameterNode or not self._parameterNode.endpointsMarkups:
+            return
+        endpointsNode = self._parameterNode.endpointsMarkups
+        if hasattr(endpointsNode, "SetLocked"):
+            endpointsNode.SetLocked(bool(locked))
+        else:
+            for pointIndex in range(endpointsNode.GetNumberOfControlPoints()):
+                if hasattr(endpointsNode, "SetNthControlPointLocked"):
+                    endpointsNode.SetNthControlPointLocked(pointIndex, bool(locked))
+
+    def _selectedGeometryEntry(self) -> GeometryCatalogEntry | None:
+        if not self.logic or not self._parameterNode:
+            return None
+        return self.logic.geometryCatalogEntryById(str(self._parameterNode.selectedGeometryId or ""))
+
+    def _singleMasterTrajectory(self) -> ProbeTrajectory:
+        if not self.logic or not self._parameterNode or not self._parameterNode.endpointsMarkups:
+            raise RuntimeError("Master trajectory markups are not available.")
+        return self.logic.extractSingleTrajectoryFromMarkups(self._parameterNode.endpointsMarkups)
+
+    def onCaseFolderPathChanged(self, _text=None) -> None:
+        if self._parameterNode and self._caseFolderLineEdit:
+            self._parameterNode.caseFolderPath = str(self._caseFolderLineEdit.text or "").strip()
+        self._updateButtonStates()
+
+    def onBrowseCaseFolderButton(self) -> None:
+        selectedDirectory = qt.QFileDialog.getExistingDirectory(
+            self.parent,
+            "Select Case Folder",
+            str(self._parameterNode.caseFolderPath or "") if self._parameterNode else "",
+        )
+        if not selectedDirectory:
+            return
+        if self._caseFolderLineEdit:
+            self._caseFolderLineEdit.text = str(selectedDirectory)
+        if self._parameterNode:
+            self._parameterNode.caseFolderPath = str(selectedDirectory)
+        self._updateButtonStates()
+
+    def onImportCaseFolderButton(self) -> None:
+        with slicer.util.tryWithErrorDisplay(_("Failed to import case folder."), waitCursor=True):
+            if not self.logic:
+                raise RuntimeError("Module logic is not initialized.")
+            caseFolderPath = str(self._caseFolderLineEdit.text).strip() if self._caseFolderLineEdit else ""
+            if not caseFolderPath:
+                raise ValueError("Select a case folder before importing.")
+            self.logic.loadCaseFolder(caseFolderPath)
+            self.initializeParameterNode()
+            if self._parameterNode:
+                self._parameterNode.caseFolderPath = caseFolderPath
+            self._clearOwnedBeginnerOutputs(clearReferences=True, unlockPlan=True)
+            if self._segmentEditorStatusLabel:
+                self._segmentEditorStatusLabel.text = "Case imported. Review or refine segments in Segment Editor if needed."
+            self._updateButtonStates()
+
+    def onOpenSegmentEditorButton(self) -> None:
+        slicer.util.selectModule("SegmentEditor")
+        if self._segmentEditorStatusLabel:
+            self._segmentEditorStatusLabel.text = "Segment Editor opened. Return here after updating tumor and critical structures."
+
+    def onSelectedGeometryChanged(self, _index=None) -> None:
+        if not self.logic or not self._parameterNode or not self._geometryComboBox:
+            return
+        if self._parameterNode.masterTrajectoryLocked:
+            return
+        selectedGeometryId = str(self._geometryComboBox.currentData() or "")
+        self._parameterNode.selectedGeometryId = selectedGeometryId
+        geometryEntry = self.logic.geometryCatalogEntryById(selectedGeometryId)
+        if geometryEntry is not None:
+            templateNode = self.logic.referenceProbeTemplateNodeForCatalogEntry(geometryEntry)
+            if templateNode is not None:
+                self._parameterNode.referenceProbeSegmentation = templateNode
+        self.logic.removeGeneratedProbeNodes()
+        self.logic.removeGeneratedTrajectoryLines()
+        self._parameterNode.generatedProbeNodeIDs = "[]"
+        self._parameterNode.generatedTrajectoryLineIDs = "[]"
+        self._clearOwnedDerivedOutputs(clearReferences=True)
+        self._clearOwnedBeginnerOutputs(clearReferences=True, unlockPlan=True)
+        self._updateButtonStates()
+
+    def onMamValueChanged(self, newValue: float) -> None:
+        if not self._parameterNode:
+            return
+        self._parameterNode.mamMm = float(newValue)
+        if self._parameterNode.outputMarginModel:
+            self._parameterNode.mamAssessmentSummaryJson = "{}"
+            if self._marginAssessmentStatusLabel:
+                self._marginAssessmentStatusLabel.text = "MAM changed. Re-run MAM assessment to refresh colors and pass/fail."
+        self._updateButtonStates()
+
+    def onCoaxialTechniqueChanged(self, _index=None) -> None:
+        if not self._parameterNode or not self._coaxialTechniqueComboBox:
+            return
+        self._parameterNode.coaxialTechnique = str(self._coaxialTechniqueComboBox.currentText or "PullBack")
+        self._updateButtonStates()
+
+    def onValidateTrajectoryButton(self) -> None:
+        with slicer.util.tryWithErrorDisplay(_("Failed to validate the master trajectory."), waitCursor=True):
+            if not self.logic or not self._parameterNode:
+                raise RuntimeError("Module logic is not initialized.")
+            trajectory = self._singleMasterTrajectory()
+            validationRows, validationSummary = self.logic.evaluateMasterTrajectoryAgainstCriticalStructures(
+                trajectory,
+                self._parameterNode.criticalStructuresSegmentation,
+                self._parameterNode.tumorSegmentation,
+            )
+            validationTable = self.logic.createOrReuseOwnedOutputNode(
+                "vtkMRMLTableNode",
+                MASTER_TRAJECTORY_VALIDATION_TABLE_NODE_NAME,
+                GENERATED_MASTER_TRAJECTORY_VALIDATION_TABLE_ATTRIBUTE,
+                self._parameterNode.masterTrajectoryValidationTable,
+            )
+            self.logic.populateMasterTrajectoryValidationTable(validationTable, validationRows)
+            self._parameterNode.masterTrajectoryValidationTable = validationTable
+            self._parameterNode.trajectoryValidationSummaryJson = json.dumps(validationSummary, sort_keys=True)
+            if self._trajectoryValidationStatusLabel:
+                self._trajectoryValidationStatusLabel.text = str(validationSummary.get("StatusText", "Trajectory validation completed."))
+            self._updateButtonStates()
+
+    def onLockMasterPlanButton(self) -> None:
+        with slicer.util.tryWithErrorDisplay(_("Failed to lock the master plan."), waitCursor=True):
+            if not self.logic or not self._parameterNode:
+                raise RuntimeError("Module logic is not initialized.")
+            trajectoryValidationSummary = self._jsonSummary(self._parameterNode.trajectoryValidationSummaryJson)
+            mamAssessmentSummary = self._jsonSummary(self._parameterNode.mamAssessmentSummaryJson)
+            if not bool(trajectoryValidationSummary.get("TrajectoryPass", False)):
+                raise ValueError("Validate the master trajectory successfully before locking the plan.")
+            if not bool(mamAssessmentSummary.get("MamPass", False)):
+                raise ValueError("Run MAM assessment successfully before locking the plan.")
+
+            trajectory = self._singleMasterTrajectory()
+            geometryEntry = self._selectedGeometryEntry()
+            if geometryEntry is None:
+                raise ValueError("Select an ablation geometry before locking the plan.")
+            tumorSegmentID, tumorSegmentName = self.logic.getPreferredSegmentInfo(
+                self._parameterNode.tumorSegmentation,
+                DEFAULT_TUMOR_SEGMENT_NAMES,
+                "locked master plan snapshot",
+            )
+            snapshot = LockedMasterPlanSnapshot(
+                geometryId=geometryEntry.geometryId,
+                geometryDisplayName=geometryEntry.displayName,
+                mamMm=float(self._parameterNode.mamMm),
+                entryPointRAS=tuple(float(value) for value in trajectory.entryPointRAS),
+                targetPointRAS=tuple(float(value) for value in trajectory.targetPointRAS),
+                directionVector=tuple(float(value) for value in trajectory.directionVector),
+                trajectoryLengthMm=float(trajectory.lengthMm),
+                activeElementLengthMm=float(geometryEntry.activeElementLengthMm),
+                trajectoryValidationPass=True,
+                marginValidationPass=True,
+                lockedAtISO=datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+                tumorSegmentationID=self._parameterNode.tumorSegmentation.GetID() if self._parameterNode.tumorSegmentation else "",
+                tumorSegmentID=tumorSegmentID,
+                tumorSegmentName=tumorSegmentName,
+                endpointsMarkupsID=self._parameterNode.endpointsMarkups.GetID() if self._parameterNode.endpointsMarkups else "",
+            )
+            snapshotTable = self.logic.createOrReuseOwnedOutputNode(
+                "vtkMRMLTableNode",
+                MASTER_PLAN_SNAPSHOT_TABLE_NODE_NAME,
+                GENERATED_MASTER_PLAN_SNAPSHOT_TABLE_ATTRIBUTE,
+                self._parameterNode.masterPlanSnapshotTable,
+            )
+            self.logic.populateKeyValueTable(snapshotTable, asdict(snapshot))
+            self._parameterNode.masterPlanSnapshotTable = snapshotTable
+            self._parameterNode.masterPlanSnapshotJson = json.dumps(asdict(snapshot), sort_keys=True)
+            self._parameterNode.masterTrajectoryLocked = True
+            self._setMasterTrajectoryLocked(True)
+            if self._coaxialStatusLabel:
+                self._coaxialStatusLabel.text = "Master plan locked. Choose a technique and compute the coaxial plan."
+            self._updateButtonStates()
+
+    def onResetMasterPlanButton(self) -> None:
+        if not self._parameterNode:
+            return
+        self._clearOwnedBeginnerOutputs(clearReferences=True, unlockPlan=True)
+        self._updateButtonStates()
+
+    def onComputeCoaxialPlanButton(self) -> None:
+        with slicer.util.tryWithErrorDisplay(_("Failed to compute the coaxial plan."), waitCursor=True):
+            if not self.logic or not self._parameterNode:
+                raise RuntimeError("Module logic is not initialized.")
+            snapshotValues = self._jsonSummary(self._parameterNode.masterPlanSnapshotJson)
+            if not snapshotValues:
+                raise ValueError("Lock the master plan before computing the coaxial plan.")
+            geometryEntry = self._selectedGeometryEntry()
+            activeElementLengthMm = float(snapshotValues.get("activeElementLengthMm", geometryEntry.activeElementLengthMm if geometryEntry else 0.0))
+            trajectory = ProbeTrajectory(
+                entryPointRAS=tuple(float(value) for value in snapshotValues.get("entryPointRAS", (0.0, 0.0, 0.0))),
+                targetPointRAS=tuple(float(value) for value in snapshotValues.get("targetPointRAS", (0.0, 0.0, 0.0))),
+                directionVector=tuple(float(value) for value in snapshotValues.get("directionVector", (0.0, 0.0, -1.0))),
+                lengthMm=float(snapshotValues.get("trajectoryLengthMm", 0.0)),
+                trajectoryIndex=0,
+            )
+            coaxialSummary = self.logic.computeCoaxialPlanFromTrajectory(
+                trajectory,
+                str(self._parameterNode.coaxialTechnique or "PullBack"),
+                activeElementLengthMm,
+            )
+            coaxialTable = self.logic.createOrReuseOwnedOutputNode(
+                "vtkMRMLTableNode",
+                COAXIAL_PLAN_TABLE_NODE_NAME,
+                GENERATED_COAXIAL_PLAN_TABLE_ATTRIBUTE,
+                self._parameterNode.coaxialPlanTable,
+            )
+            self.logic.populateKeyValueTable(coaxialTable, asdict(coaxialSummary))
+            self._parameterNode.coaxialPlanTable = coaxialTable
+            self._parameterNode.coaxialPlanSummaryJson = json.dumps(asdict(coaxialSummary), sort_keys=True)
+            coaxialTargetNode = self.logic.createOrReuseOwnedOutputNode(
+                "vtkMRMLMarkupsFiducialNode",
+                COAXIAL_NAVIGATION_TARGET_NODE_NAME,
+                GENERATED_COAXIAL_TARGET_ATTRIBUTE,
+                self._parameterNode.coaxialNavigationTarget,
+            )
+            slicer.util.updateMarkupsControlPointsFromArray(
+                coaxialTargetNode,
+                np.array([coaxialSummary.navigationTargetRAS], dtype=float),
+            )
+            coaxialTargetNode.SetLocked(True)
+            self._parameterNode.coaxialNavigationTarget = coaxialTargetNode
+            self.logic.createOrUpdateCoaxialLine(
+                trajectory.entryPointRAS,
+                coaxialSummary.navigationTargetRAS,
+            )
+            if self._coaxialStatusLabel:
+                self._coaxialStatusLabel.text = str(coaxialSummary.notes)
+            self._updateButtonStates()
+
     def onLoadSampleCaseButton(self) -> None:
         with slicer.util.tryWithErrorDisplay(_("Failed to load sample case."), waitCursor=True):
             if not self.logic:
@@ -1379,12 +2166,17 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self.logic.loadBundledSampleScene(selectedScenePath)
             # Scene load triggers module-scene events, but run one more initialization pass to refresh selectors.
             self.initializeParameterNode()
+            if self._parameterNode:
+                self._parameterNode.caseFolderPath = ""
+            self._clearOwnedBeginnerOutputs(clearReferences=True, unlockPlan=True)
             self._updateButtonStates()
 
     def onPlaceProbesButton(self) -> None:
         with slicer.util.tryWithErrorDisplay(_("Failed to place probes."), waitCursor=True):
             if not self.logic or not self._parameterNode:
                 raise RuntimeError("Module logic is not initialized.")
+            if self._parameterNode.masterTrajectoryLocked:
+                raise ValueError("Reset the locked master plan before changing the applicator placement.")
 
             if not self._parameterNode.referenceProbeSegmentation:
                 raise ValueError("Select a reference probe segmentation before placing probes.")
@@ -1393,6 +2185,11 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             controlPointCount = int(self._parameterNode.endpointsMarkups.GetNumberOfControlPoints())
             if controlPointCount == 0:
                 raise ValueError("Endpoint markups node has no control points.")
+            if BEGINNER_WORKFLOW_MODE and controlPointCount != 2:
+                raise ValueError(
+                    f"Beginner workflow expects exactly 2 control points, but found {controlPointCount}. "
+                    "Place one entry point and one applicator endpoint."
+                )
             if controlPointCount % 2 != 0:
                 raise ValueError(
                     f"Endpoint markups has {controlPointCount} control points. Add one more point to complete entry/target pairs."
@@ -1426,6 +2223,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
 
             # Probe placement invalidates previously merged/evaluated module-owned outputs.
             self._clearOwnedDerivedOutputs(clearReferences=True)
+            self._clearOwnedBeginnerOutputs(clearReferences=True, unlockPlan=True)
 
             if self._parameterNode.createTrajectoryLinesOnPlacement:
                 generatedLineNodeIDs = self.logic.createTrajectoryLines(trajectories, clearExisting=True)
@@ -1447,11 +2245,18 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         with slicer.util.tryWithErrorDisplay(_("Failed to create trajectory lines."), waitCursor=True):
             if not self.logic or not self._parameterNode:
                 raise RuntimeError("Module logic is not initialized.")
+            if self._parameterNode.masterTrajectoryLocked:
+                raise ValueError("Reset the locked master plan before editing the master trajectory.")
             if not self._parameterNode.endpointsMarkups:
                 raise ValueError("Select an endpoint markups node before creating trajectory lines.")
             controlPointCount = int(self._parameterNode.endpointsMarkups.GetNumberOfControlPoints())
             if controlPointCount == 0:
                 raise ValueError("Endpoint markups node has no control points.")
+            if BEGINNER_WORKFLOW_MODE and controlPointCount != 2:
+                raise ValueError(
+                    f"Beginner workflow expects exactly 2 control points, but found {controlPointCount}. "
+                    "Place one entry point and one applicator endpoint."
+                )
             if controlPointCount % 2 != 0:
                 raise ValueError(
                     f"Endpoint markups has {controlPointCount} control points. Add one more point to complete entry/target pairs."
@@ -1459,12 +2264,15 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             trajectories = self.logic.extractTrajectoriesFromMarkups(self._parameterNode.endpointsMarkups, strictEven=True)
             generatedLineNodeIDs = self.logic.createTrajectoryLines(trajectories, clearExisting=True)
             self._parameterNode.generatedTrajectoryLineIDs = self.logic.serializeNodeIDs(generatedLineNodeIDs)
+            self._clearOwnedBeginnerOutputs(clearReferences=True, unlockPlan=True)
             self._updateButtonStates()
 
     def onMergeTranslatedProbesButton(self) -> None:
         with slicer.util.tryWithErrorDisplay(_("Failed to merge translated probes."), waitCursor=True):
             if not self.logic or not self._parameterNode:
                 raise RuntimeError("Module logic is not initialized.")
+            if self._parameterNode.masterTrajectoryLocked:
+                raise ValueError("Reset the locked master plan before changing the ablation volume.")
             generatedProbeNodeIDs = self.logic.resolveExistingNodeIDs(
                 self.logic.deserializeNodeIDs(self._parameterNode.generatedProbeNodeIDs)
             )
@@ -1487,6 +2295,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self._parameterNode.resultTable = None
             self._parameterNode.planSummaryTable = None
             self._parameterNode.marginThresholdSummaryTable = None
+            self._clearOwnedBeginnerOutputs(clearReferences=True, unlockPlan=True)
             self._updateButtonStates()
 
     def onRegisterTumorButton(self) -> None:
@@ -1500,6 +2309,8 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 self._parameterNode.tumorTransform,
             )
             self._parameterNode.tumorTransform = transformNode
+            if self._segmentEditorStatusLabel:
+                self._segmentEditorStatusLabel.text = "Fiducial registration applied to the tumor segmentation."
             self._updateButtonStates()
 
     def onHardenTumorTransformButton(self) -> None:
@@ -1507,13 +2318,17 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             if not self.logic or not self._parameterNode:
                 raise RuntimeError("Module logic is not initialized.")
             self.logic.hardenTumorTransform(self._parameterNode.tumorSegmentation)
+            if self._segmentEditorStatusLabel:
+                self._segmentEditorStatusLabel.text = "Tumor registration hardened into the segmentation geometry."
             self._updateButtonStates()
 
     def onRiskStructuresSegmentationChanged(self, _node=None) -> None:
         if not self.logic or not self._parameterNode:
             return
 
+        self._parameterNode.criticalStructuresSegmentation = self._parameterNode.riskStructuresSegmentation
         self._clearOwnedSafetyOutputs(clearReferences=True)
+        self._clearOwnedBeginnerOutputs(clearReferences=True)
         self._updateButtonStates()
 
     def _buildProbeCoordinationConstraintSettings(self) -> ProbeCoordinationConstraintSettings:
@@ -1637,6 +2452,12 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             logging.info("Margin summary: %s", summary)
 
             signedMarginValues = self.logic.getSignedMarginValues(outputMarginModel)
+            mamAssessmentSummary = self.logic.applyBeginnerMamColoring(outputMarginModel, float(self._parameterNode.mamMm))
+            self._parameterNode.mamAssessmentSummaryJson = json.dumps(mamAssessmentSummary, sort_keys=True)
+            if self._marginAssessmentStatusLabel:
+                self._marginAssessmentStatusLabel.text = str(mamAssessmentSummary.get("StatusText", "MAM assessment completed."))
+            if bool(mamAssessmentSummary.get("MamPass", False)):
+                slicer.util.infoDisplay(str(mamAssessmentSummary.get("StatusText", "MAM satisfied.")), windowTitle="MAM Validation")
             trajectoryCount = len(
                 self.logic.resolveExistingNodeIDs(
                     self.logic.deserializeNodeIDs(self._parameterNode.generatedProbeNodeIDs)
@@ -1645,8 +2466,9 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             if trajectoryCount <= 0:
                 trajectoryCount = self.logic.tableNodeRowCount(self._parameterNode.trajectorySummaryTable)
 
-            tumorSegmentID, tumorSegmentName = self.logic.getWorkingSegmentInfo(
+            tumorSegmentID, tumorSegmentName = self.logic.getPreferredSegmentInfo(
                 self._parameterNode.tumorSegmentation,
+                DEFAULT_TUMOR_SEGMENT_NAMES,
                 "plan summary",
             )
             planSummary = self.logic.computeSignedMarginSummary(
@@ -1675,7 +2497,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self._parameterNode.marginThresholdSummaryTable = marginThresholdSummaryTable
 
             structureSafetySummaryRows, structureSafetyThresholdRows = self.logic.evaluateStructureSafety(
-                self._parameterNode.riskStructuresSegmentation,
+                self._parameterNode.criticalStructuresSegmentation,
                 probeSegmentation,
             )
             if len(structureSafetySummaryRows) > 0:
@@ -1701,7 +2523,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             else:
                 self._clearOwnedSafetyOutputs(clearReferences=True)
 
-            if self._parameterNode.endpointsMarkups:
+            if self._parameterNode.endpointsMarkups and not BEGINNER_WORKFLOW_MODE:
                 controlPointCount = int(self._parameterNode.endpointsMarkups.GetNumberOfControlPoints())
                 if controlPointCount >= 2 and controlPointCount % 2 == 0:
                     trajectories = self.logic.extractTrajectoriesFromMarkups(
@@ -1711,6 +2533,8 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                     self._evaluateAndPublishProbeCoordination(trajectories, updateStatusLabel=True)
                 else:
                     self._clearOwnedCoordinationOutputs(clearReferences=True)
+            elif BEGINNER_WORKFLOW_MODE:
+                self._clearOwnedCoordinationOutputs(clearReferences=True)
             self._updateButtonStates()
 
     def onRecolorMarginsButton(self) -> None:
@@ -2101,6 +2925,109 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
                 if self._canonicalNodeName(candidateNode.GetName()) == preferredName:
                     return candidateNode
         return None
+
+    def loadGeometryCatalog(self) -> list[GeometryCatalogEntry]:
+        catalogPath = self._resolveResourcePath(BEGINNER_GEOMETRY_CATALOG_RELATIVE_PATH)
+        if not catalogPath.exists():
+            logging.warning("Beginner geometry catalog was not found: %s", catalogPath)
+            return []
+
+        try:
+            catalogValues = json.loads(catalogPath.read_text(encoding="utf-8"))
+        except Exception:
+            logging.exception("Failed to parse beginner geometry catalog: %s", catalogPath)
+            return []
+
+        geometryEntries: list[GeometryCatalogEntry] = []
+        for entry in catalogValues if isinstance(catalogValues, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            geometryId = str(entry.get("id", "")).strip()
+            displayName = str(entry.get("label", "")).strip()
+            templateRelativePath = str(entry.get("templateFile", "")).strip()
+            if not geometryId or not displayName or not templateRelativePath:
+                continue
+            geometryEntries.append(
+                GeometryCatalogEntry(
+                    geometryId=geometryId,
+                    displayName=displayName,
+                    templateRelativePath=templateRelativePath,
+                    activeElementLengthMm=float(entry.get("activeElementLengthMm", 30.0)),
+                )
+            )
+        return geometryEntries
+
+    def geometryCatalogEntryById(self, geometryId: str) -> GeometryCatalogEntry | None:
+        normalizedGeometryId = str(geometryId or "").strip().lower()
+        if not normalizedGeometryId:
+            return None
+        for geometryEntry in self.loadGeometryCatalog():
+            if str(geometryEntry.geometryId).strip().lower() == normalizedGeometryId:
+                return geometryEntry
+        return None
+
+    def referenceProbeTemplateNodeForCatalogEntry(self, geometryEntry: GeometryCatalogEntry | None) -> vtkMRMLSegmentationNode | None:
+        if geometryEntry is None:
+            return None
+        templatePath = self._resolveResourcePath(geometryEntry.templateRelativePath)
+        normalizedTemplatePath = self._normalizeFilesystemPath(templatePath)
+        for templateNode in self.ensureReferenceProbeTemplatesLoaded():
+            sourcePath = templateNode.GetAttribute(REFERENCE_PROBE_TEMPLATE_SOURCE_PATH_ATTRIBUTE) or ""
+            if sourcePath and self._normalizeFilesystemPath(sourcePath) == normalizedTemplatePath:
+                return templateNode
+        return None
+
+    def loadCaseFolder(self, caseFolderPath: str | Path) -> None:
+        resolvedCaseFolderPath = Path(caseFolderPath).resolve()
+        if not resolvedCaseFolderPath.exists() or not resolvedCaseFolderPath.is_dir():
+            raise ValueError(f"Case folder was not found: {resolvedCaseFolderPath}")
+        if not self._loadBundledCaseAssetsFromDirectory(resolvedCaseFolderPath):
+            raise RuntimeError(f"No loadable .nrrd or .seg.nrrd assets were found in: {resolvedCaseFolderPath}")
+
+    def findPreferredSegmentID(
+        self,
+        segmentationNode: vtkMRMLSegmentationNode | None,
+        preferredNames: Sequence[str],
+        operationName: str,
+        fallbackToFirst: bool = True,
+    ) -> str:
+        if not segmentationNode:
+            raise ValueError(f"{operationName}: segmentation node is required.")
+        segmentation = segmentationNode.GetSegmentation()
+        if not segmentation or segmentation.GetNumberOfSegments() <= 0:
+            raise RuntimeError(f"{operationName}: segmentation '{segmentationNode.GetName()}' has no segments.")
+
+        normalizedPreferredNames = {self._canonicalNodeName(name) for name in preferredNames if str(name or "").strip()}
+        if normalizedPreferredNames:
+            for segmentIndex in range(segmentation.GetNumberOfSegments()):
+                segmentID = segmentation.GetNthSegmentID(segmentIndex)
+                segment = segmentation.GetSegment(segmentID) if segmentID else None
+                if segment and self._canonicalNodeName(segment.GetName()) in normalizedPreferredNames:
+                    return str(segmentID)
+
+        if not fallbackToFirst:
+            raise RuntimeError(f"{operationName}: preferred segment was not found in '{segmentationNode.GetName()}'.")
+        return self.getWorkingSegmentID(segmentationNode, operationName)
+
+    def getPreferredSegmentInfo(
+        self,
+        segmentationNode: vtkMRMLSegmentationNode | None,
+        preferredNames: Sequence[str],
+        operationName: str,
+        fallbackToFirst: bool = True,
+    ) -> tuple[str, str]:
+        segmentID = self.findPreferredSegmentID(segmentationNode, preferredNames, operationName, fallbackToFirst=fallbackToFirst)
+        segment = segmentationNode.GetSegmentation().GetSegment(segmentID) if segmentationNode else None
+        segmentName = segment.GetName() if segment and segment.GetName() else segmentID
+        return segmentID, segmentName
+
+    def extractSingleTrajectoryFromMarkups(self, endpointsMarkups: vtkMRMLMarkupsFiducialNode | None) -> ProbeTrajectory:
+        trajectories = self.extractTrajectoriesFromMarkups(endpointsMarkups, strictEven=True)
+        if len(trajectories) != 1:
+            raise ValueError(
+                f"Beginner workflow expects exactly one entry/endpoint pair, but found {len(trajectories)} trajectories."
+            )
+        return trajectories[0]
 
     @staticmethod
     def tableNodeRowCount(tableNode: vtkMRMLTableNode | None) -> int:
@@ -4028,7 +4955,12 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
                 "FailedTrajectoryIndices": "",
             }
 
-        tumorSegmentID = self.getWorkingSegmentID(tumorSegmentation, "no-touch evaluation")
+        tumorSegmentID = self.findPreferredSegmentID(
+            tumorSegmentation,
+            DEFAULT_TUMOR_SEGMENT_NAMES,
+            "no-touch evaluation",
+            fallbackToFirst=True,
+        )
         self._ensureSegmentationHasClosedSurface(tumorSegmentation)
         tumorSurface = vtk.vtkPolyData()
         tumorSegmentation.GetClosedSurfaceRepresentation(tumorSegmentID, tumorSurface)
@@ -4228,6 +5160,169 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             generatedLineNodeIDs.append(lineNode.GetID())
         return generatedLineNodeIDs
 
+    @staticmethod
+    def _lineIntersectsClosedSurface(
+        lineStartRAS: Sequence[float],
+        lineEndRAS: Sequence[float],
+        closedSurface: vtk.vtkPolyData,
+    ) -> bool:
+        if closedSurface is None or closedSurface.GetNumberOfPoints() <= 0:
+            return False
+        obbTree = vtk.vtkOBBTree()
+        obbTree.SetDataSet(closedSurface)
+        obbTree.BuildLocator()
+        intersectionPoints = vtk.vtkPoints()
+        intersectionCellIds = vtk.vtkIdList()
+        intersectionCount = obbTree.IntersectWithLine(lineStartRAS, lineEndRAS, intersectionPoints, intersectionCellIds)
+        return int(intersectionCount) > 0 or intersectionPoints.GetNumberOfPoints() > 0
+
+    @staticmethod
+    def _lineToClosedSurfaceMinDistanceMm(
+        lineStartRAS: Sequence[float],
+        lineEndRAS: Sequence[float],
+        closedSurface: vtk.vtkPolyData,
+        sampleCount: int = BEGINNER_TRAJECTORY_DISTANCE_SAMPLE_COUNT,
+    ) -> float:
+        if closedSurface is None or closedSurface.GetNumberOfPoints() <= 0:
+            return float("nan")
+        implicitDistance = vtk.vtkImplicitPolyDataDistance()
+        implicitDistance.SetInput(closedSurface)
+        startPoint = np.array(lineStartRAS, dtype=float)
+        endPoint = np.array(lineEndRAS, dtype=float)
+        if sampleCount <= 1:
+            sampleCount = 2
+        distances = [
+            abs(float(implicitDistance.EvaluateFunction((startPoint + ((endPoint - startPoint) * sampleIndex / float(sampleCount - 1))).tolist())))
+            for sampleIndex in range(sampleCount)
+        ]
+        finiteDistances = [distance for distance in distances if math.isfinite(distance)]
+        return float(min(finiteDistances)) if len(finiteDistances) > 0 else float("nan")
+
+    def evaluateMasterTrajectoryAgainstCriticalStructures(
+        self,
+        trajectory: ProbeTrajectory,
+        criticalStructuresSegmentation: vtkMRMLSegmentationNode | None,
+        tumorSegmentation: vtkMRMLSegmentationNode | None = None,
+    ) -> tuple[list[dict[str, float | int | bool | str]], dict[str, float | int | bool | str]]:
+        if criticalStructuresSegmentation is None:
+            raise ValueError("Critical-structures segmentation is required for trajectory validation.")
+
+        excludedSegmentID = ""
+        if tumorSegmentation and criticalStructuresSegmentation.GetID() == tumorSegmentation.GetID():
+            excludedSegmentID = self.findPreferredSegmentID(
+                tumorSegmentation,
+                DEFAULT_TUMOR_SEGMENT_NAMES,
+                "master trajectory validation",
+                fallbackToFirst=True,
+            )
+
+        validationRows: list[dict[str, float | int | bool | str]] = []
+        for segmentInfo in self.getValidSegmentationSegments(criticalStructuresSegmentation, "master trajectory validation"):
+            segmentID = str(segmentInfo["segmentID"])
+            if excludedSegmentID and segmentID == excludedSegmentID:
+                continue
+
+            closedSurface = vtk.vtkPolyData()
+            criticalStructuresSegmentation.GetClosedSurfaceRepresentation(segmentID, closedSurface)
+            intersects = self._lineIntersectsClosedSurface(
+                trajectory.entryPointRAS,
+                trajectory.targetPointRAS,
+                closedSurface,
+            )
+            minDistanceMm = self._lineToClosedSurfaceMinDistanceMm(
+                trajectory.entryPointRAS,
+                trajectory.targetPointRAS,
+                closedSurface,
+            )
+            validationRows.append(
+                {
+                    "StructureSegmentID": segmentID,
+                    "StructureName": str(segmentInfo["segmentName"]),
+                    "TrajectoryIntersects": bool(intersects),
+                    "MinDistanceMm": float(minDistanceMm),
+                }
+            )
+
+        intersectingRows = [row for row in validationRows if bool(row.get("TrajectoryIntersects", False))]
+        minDistanceValues = [
+            float(row.get("MinDistanceMm", float("nan")))
+            for row in validationRows
+            if math.isfinite(float(row.get("MinDistanceMm", float("nan"))))
+        ]
+        trajectoryPass = len(intersectingRows) == 0 and len(validationRows) > 0
+        if len(validationRows) == 0:
+            statusText = "No critical-structure segments were available for validation."
+        elif trajectoryPass:
+            statusText = "Trajectory valid: no critical-structure intersections detected."
+        else:
+            failedStructureNames = ", ".join(str(row.get("StructureName", "")) for row in intersectingRows)
+            statusText = f"Trajectory invalid: intersects {failedStructureNames}."
+
+        summary = {
+            "TrajectoryPass": bool(trajectoryPass),
+            "IntersectedStructureCount": int(len(intersectingRows)),
+            "CheckedStructureCount": int(len(validationRows)),
+            "MinDistanceMm": float(min(minDistanceValues)) if len(minDistanceValues) > 0 else float("nan"),
+            "IntersectedStructureNames": ";".join(str(row.get("StructureName", "")) for row in intersectingRows),
+            "StatusText": statusText,
+        }
+        return validationRows, summary
+
+    def computeCoaxialPlanFromTrajectory(
+        self,
+        trajectory: ProbeTrajectory,
+        technique: str,
+        activeElementLengthMm: float,
+    ) -> CoaxialPlanSummary:
+        normalizedDirection = _normalize_vector(trajectory.directionVector)
+        techniqueName = str(technique or "PullBack")
+        if techniqueName == "PushThrough":
+            navigationTarget = np.array(trajectory.targetPointRAS, dtype=float) - (normalizedDirection * float(activeElementLengthMm))
+            noteText = (
+                f"Push-through: navigate the coaxial needle to the derived target, then advance the applicator "
+                f"{float(activeElementLengthMm):.1f} mm."
+            )
+        else:
+            navigationTarget = np.array(trajectory.targetPointRAS, dtype=float)
+            noteText = (
+                f"Pull-back: navigate the coaxial needle to the locked endpoint, then retract the sheath to expose "
+                f"{float(activeElementLengthMm):.1f} mm of active element."
+            )
+
+        return CoaxialPlanSummary(
+            technique=techniqueName,
+            activeElementLengthMm=float(activeElementLengthMm),
+            navigationTargetRAS=tuple(float(value) for value in navigationTarget.tolist()),
+            masterEntryPointRAS=tuple(float(value) for value in trajectory.entryPointRAS),
+            masterTargetPointRAS=tuple(float(value) for value in trajectory.targetPointRAS),
+            notes=noteText,
+        )
+
+    def createOrUpdateCoaxialLine(
+        self,
+        entryPointRAS: Sequence[float],
+        navigationTargetRAS: Sequence[float],
+    ):
+        existingLineNodes = [
+            node for node in slicer.util.getNodesByClass("vtkMRMLMarkupsLineNode")
+            if node.GetAttribute(GENERATED_COAXIAL_LINE_ATTRIBUTE) == "1"
+        ]
+        lineNode = existingLineNodes[0] if len(existingLineNodes) > 0 else slicer.mrmlScene.AddNewNodeByClass(
+            "vtkMRMLMarkupsLineNode",
+            COAXIAL_NAVIGATION_LINE_NODE_NAME,
+        )
+        slicer.util.updateMarkupsControlPointsFromArray(
+            lineNode,
+            np.array([entryPointRAS, navigationTargetRAS], dtype=float),
+        )
+        lineNode.SetAttribute(GENERATED_COAXIAL_LINE_ATTRIBUTE, "1")
+        if lineNode.GetDisplayNode():
+            lineNode.GetDisplayNode().SetPropertiesLabelVisibility(False)
+            lineNode.GetDisplayNode().SetPointLabelsVisibility(False)
+        for redundantLineNode in existingLineNodes[1:]:
+            slicer.mrmlScene.RemoveNode(redundantLineNode)
+        return lineNode
+
     def removeNodesByAttribute(self, className: str, attributeName: str, attributeValue: str = "1", keepNodeID: str | None = None) -> None:
         for node in slicer.util.getNodesByClass(className):
             if keepNodeID and node.GetID() == keepNodeID:
@@ -4401,8 +5496,15 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             TEMP_PROBE_MODEL_NODE_NAME,
             outputModelNode=tempProbeModel,
         )
-        tumorModel = self.segmentationFirstSegmentToModel(
+        tumorSegmentID = self.findPreferredSegmentID(
             tumorSegmentation,
+            DEFAULT_TUMOR_SEGMENT_NAMES,
+            "margin evaluation",
+            fallbackToFirst=True,
+        )
+        tumorModel = self.segmentationSegmentToModel(
+            tumorSegmentation,
+            tumorSegmentID,
             TEMP_TUMOR_MODEL_NODE_NAME,
             outputModelNode=tempTumorModel,
         )
@@ -4539,6 +5641,90 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         self.configureMarginDisplayNode(marginModelNode, autoRange=True)
         self.refreshNodeDisplay(marginModelNode)
 
+    def ensureBeginnerMamColorNode(self):
+        for colorNode in slicer.util.getNodesByClass("vtkMRMLColorTableNode"):
+            if str(colorNode.GetName() or "").strip() == BEGINNER_MAM_COLOR_NODE_NAME:
+                return colorNode
+
+        colorNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLColorTableNode", BEGINNER_MAM_COLOR_NODE_NAME)
+        colorNode.SetAttribute(GENERATED_MARGIN_MODEL_ATTRIBUTE, "1")
+        colorNode.SetTypeToUser()
+        colorNode.SetNumberOfColors(3)
+        if hasattr(colorNode, "SetNamesInitialised"):
+            colorNode.SetNamesInitialised(True)
+        colorNode.SetColor(0, "BelowHalfMAM", 0.84, 0.15, 0.16, 1.0)
+        colorNode.SetColor(1, "BetweenHalfMAMAndMAM", 0.95, 0.55, 0.18, 1.0)
+        colorNode.SetColor(2, "AtLeastMAM", 0.18, 0.62, 0.31, 1.0)
+        return colorNode
+
+    @staticmethod
+    def computeMamAssessmentSummary(signedMarginValues: Sequence[float], mamMm: float) -> dict[str, float | int | bool | str]:
+        if len(signedMarginValues) == 0:
+            raise ValueError("MAM assessment cannot be computed because no signed margin values are available.")
+
+        achievedMargins = -np.asarray(signedMarginValues, dtype=float)
+        achievedMargins = achievedMargins[np.isfinite(achievedMargins)]
+        if achievedMargins.size == 0:
+            raise ValueError("MAM assessment cannot be computed because signed margin values are invalid.")
+
+        halfMamMm = float(max(0.0, mamMm) * 0.5)
+        redCount = int(np.count_nonzero(achievedMargins < halfMamMm))
+        orangeCount = int(np.count_nonzero((achievedMargins >= halfMamMm) & (achievedMargins < float(mamMm))))
+        greenCount = int(np.count_nonzero(achievedMargins >= float(mamMm)))
+        mamPass = bool(float(np.min(achievedMargins)) >= float(mamMm))
+        statusText = (
+            f"MAM satisfied: all margins are at least {float(mamMm):.1f} mm."
+            if mamPass
+            else f"MAM not satisfied: minimum achieved margin is {float(np.min(achievedMargins)):.2f} mm."
+        )
+        return {
+            "MamMm": float(mamMm),
+            "MamPass": mamPass,
+            "MinAchievedMarginMm": float(np.min(achievedMargins)),
+            "MeanAchievedMarginMm": float(np.mean(achievedMargins)),
+            "MaxAchievedMarginMm": float(np.max(achievedMargins)),
+            "CountRed": redCount,
+            "CountOrange": orangeCount,
+            "CountGreen": greenCount,
+            "StatusText": statusText,
+        }
+
+    def applyBeginnerMamColoring(self, marginModelNode: vtkMRMLModelNode | None, mamMm: float) -> dict[str, float | int | bool | str]:
+        if not marginModelNode:
+            raise ValueError("Margin model node is required.")
+        if mamMm < 0.0:
+            raise ValueError("MAM must be non-negative.")
+
+        signedDistanceArray = self.getSignedDistanceArray(marginModelNode)
+        backupArray = self.getSignedDistanceBackupArray(marginModelNode)
+        if backupArray is None:
+            self.backupSignedDistanceArray(marginModelNode, signedDistanceArray)
+            backupArray = self.getSignedDistanceBackupArray(marginModelNode)
+        if backupArray is None:
+            raise RuntimeError("Signed-distance backup array is unavailable for MAM coloring.")
+
+        halfMamMm = float(mamMm) * 0.5
+        signedMarginsForSummary: list[float] = []
+        for pointIndex in range(_data_array_value_count(backupArray)):
+            signedDistanceValue = float(backupArray.GetValue(pointIndex))
+            achievedMargin = -signedDistanceValue
+            signedMarginsForSummary.append(signedDistanceValue)
+            if achievedMargin >= float(mamMm):
+                bucketValue = 2.0
+            elif achievedMargin >= halfMamMm:
+                bucketValue = 1.0
+            else:
+                bucketValue = 0.0
+            signedDistanceArray.SetValue(pointIndex, bucketValue)
+
+        colorNode = self.ensureBeginnerMamColorNode()
+        self.configureMarginDisplayNode(marginModelNode, autoRange=False, scalarRange=(0.0, 2.0))
+        displayNode = marginModelNode.GetDisplayNode()
+        if displayNode:
+            displayNode.SetAndObserveColorNodeID(colorNode.GetID())
+        self.refreshNodeDisplay(marginModelNode)
+        return self.computeMamAssessmentSummary(signedMarginsForSummary, mamMm)
+
     @staticmethod
     def recolorSignedDistanceArray(signedDistanceArray: vtk.vtkDataArray, thresholds: Sequence[float]) -> int:
         if signedDistanceArray is None:
@@ -4645,6 +5831,41 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         self._addNumericColumn(tableNode, "Direction A", [float(metric.get("DirA", 0.0)) for metric in trajectoryMetrics])
         self._addNumericColumn(tableNode, "Direction S", [float(metric.get("DirS", 0.0)) for metric in trajectoryMetrics])
         self._addNumericColumn(tableNode, "Length (mm)", [float(metric.get("LengthMm", 0.0)) for metric in trajectoryMetrics])
+
+    def populateMasterTrajectoryValidationTable(
+        self,
+        tableNode: vtkMRMLTableNode | None,
+        validationRows: Sequence[dict[str, float | int | bool | str]],
+    ) -> None:
+        if not tableNode:
+            raise ValueError("Master trajectory validation table node is required.")
+
+        orderedRows = list(validationRows)
+        tableNode.RemoveAllColumns()
+        self._addStringColumn(tableNode, "Structure Segment ID", [str(row.get("StructureSegmentID", "")) for row in orderedRows])
+        self._addStringColumn(tableNode, "Structure Name", [str(row.get("StructureName", "")) for row in orderedRows])
+        self._addStringColumn(
+            tableNode,
+            "Trajectory Intersects",
+            ["Yes" if bool(row.get("TrajectoryIntersects", False)) else "No" for row in orderedRows],
+        )
+        self._addNumericColumn(tableNode, "Min Distance (mm)", [float(row.get("MinDistanceMm", float("nan"))) for row in orderedRows])
+
+    def populateKeyValueTable(self, tableNode: vtkMRMLTableNode | None, valuesByKey: dict[str, Any]) -> None:
+        if not tableNode:
+            raise ValueError("Key/value table node is required.")
+
+        orderedKeys = [str(key) for key in valuesByKey.keys()]
+        orderedValues: list[str] = []
+        for key in orderedKeys:
+            value = valuesByKey.get(key)
+            if isinstance(value, (dict, list, tuple)):
+                orderedValues.append(json.dumps(value, sort_keys=True))
+            else:
+                orderedValues.append(str(value))
+        tableNode.RemoveAllColumns()
+        self._addStringColumn(tableNode, "Field", orderedKeys)
+        self._addStringColumn(tableNode, "Value", orderedValues)
 
     def populatePlanSummaryTable(self, tableNode: vtkMRMLTableNode | None, planSummary: dict[str, float | int | str]) -> None:
         if not tableNode:
@@ -5658,6 +6879,10 @@ class SurgicalVision3D_PlannerTest(ScriptedLoadableModuleTest):
         self.test_rotation_matrix_standard_parallel_antiparallel()
         self.test_extract_trajectories_from_paired_points()
         self.test_extract_trajectories_odd_count_handling()
+        self.test_extract_single_master_trajectory_from_markups()
+        self.test_geometry_catalog_loading()
+        self.test_mam_assessment_summary()
+        self.test_compute_coaxial_plan_pushthrough_offset()
         self.test_recolor_and_restore_include_last_array_value()
         self.test_parameter_node_initialization_and_restore()
 
@@ -5701,6 +6926,54 @@ class SurgicalVision3D_PlannerTest(ScriptedLoadableModuleTest):
 
         trajectories = SurgicalVision3D_PlannerLogic.extractTrajectoriesFromPointPairs(oddPoints, strictEven=False)
         self.assertEqual(len(trajectories), 1)
+
+    def test_extract_single_master_trajectory_from_markups(self):
+        logic = SurgicalVision3D_PlannerLogic()
+        endpointsNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "endpoints")
+        slicer.util.updateMarkupsControlPointsFromArray(
+            endpointsNode,
+            np.array([(0.0, 0.0, 0.0), (0.0, 0.0, -15.0)], dtype=float),
+        )
+
+        trajectory = logic.extractSingleTrajectoryFromMarkups(endpointsNode)
+        self.assertAlmostEqual(float(trajectory.lengthMm), 15.0, places=6)
+
+        slicer.util.updateMarkupsControlPointsFromArray(
+            endpointsNode,
+            np.array([(0.0, 0.0, 0.0), (0.0, 0.0, -15.0), (5.0, 0.0, 0.0), (5.0, 0.0, -5.0)], dtype=float),
+        )
+        with self.assertRaises(ValueError):
+            logic.extractSingleTrajectoryFromMarkups(endpointsNode)
+
+    def test_geometry_catalog_loading(self):
+        geometryEntries = SurgicalVision3D_PlannerLogic().loadGeometryCatalog()
+        self.assertGreater(len(geometryEntries), 0)
+        self.assertEqual(geometryEntries[0].geometryId, "emprint_75w_5m")
+        self.assertTrue(all(float(entry.activeElementLengthMm) > 0.0 for entry in geometryEntries))
+
+    def test_mam_assessment_summary(self):
+        summary = SurgicalVision3D_PlannerLogic.computeMamAssessmentSummary((-12.0, -7.0, -4.0), 10.0)
+        self.assertFalse(bool(summary["MamPass"]))
+        self.assertEqual(int(summary["CountRed"]), 1)
+        self.assertEqual(int(summary["CountOrange"]), 1)
+        self.assertEqual(int(summary["CountGreen"]), 1)
+        self.assertAlmostEqual(float(summary["MinAchievedMarginMm"]), 4.0, places=6)
+
+    def test_compute_coaxial_plan_pushthrough_offset(self):
+        trajectory = ProbeTrajectory(
+            entryPointRAS=(0.0, 0.0, 0.0),
+            targetPointRAS=(0.0, 0.0, -20.0),
+            directionVector=(0.0, 0.0, -1.0),
+            lengthMm=20.0,
+            trajectoryIndex=0,
+        )
+        coaxialSummary = SurgicalVision3D_PlannerLogic().computeCoaxialPlanFromTrajectory(
+            trajectory,
+            "PushThrough",
+            10.0,
+        )
+        self.assertEqual(coaxialSummary.technique, "PushThrough")
+        self.assertTrue(np.allclose(np.array(coaxialSummary.navigationTargetRAS), np.array([0.0, 0.0, -10.0]), atol=1e-6))
 
     def test_recolor_and_restore_include_last_array_value(self):
         signedDistances = vtk.vtkDoubleArray()

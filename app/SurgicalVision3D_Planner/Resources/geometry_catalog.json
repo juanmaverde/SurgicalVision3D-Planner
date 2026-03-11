@@ -1,0 +1,50 @@
+[
+  {
+    "id": "emprint_75w_5m",
+    "label": "Emprint 75W / 5 min",
+    "templateFile": "Resources/geometries/01_emprint-75w_5m.stl",
+    "activeElementLengthMm": 30.0
+  },
+  {
+    "id": "emprint_75w_7_5m",
+    "label": "Emprint 75W / 7.5 min",
+    "templateFile": "Resources/geometries/02_emprint-75w_7-5m.stl",
+    "activeElementLengthMm": 30.0
+  },
+  {
+    "id": "emprint_100w_5m",
+    "label": "Emprint 100W / 5 min",
+    "templateFile": "Resources/geometries/03_emprint-100w_5m.stl",
+    "activeElementLengthMm": 30.0
+  },
+  {
+    "id": "emprint_100w_7_5m",
+    "label": "Emprint 100W / 7.5 min",
+    "templateFile": "Resources/geometries/04_emprint-100w_7-5m.stl",
+    "activeElementLengthMm": 30.0
+  },
+  {
+    "id": "emprint_100w_10m",
+    "label": "Emprint 100W / 10 min",
+    "templateFile": "Resources/geometries/05_emprint-100w_10m.stl",
+    "activeElementLengthMm": 30.0
+  },
+  {
+    "id": "emprint_150w_6_5m",
+    "label": "Emprint 150W / 6.5 min",
+    "templateFile": "Resources/geometries/06_emprint-150w_6-5m.stl",
+    "activeElementLengthMm": 30.0
+  },
+  {
+    "id": "emprint_150w_8m",
+    "label": "Emprint 150W / 8 min",
+    "templateFile": "Resources/geometries/07_emprint-150w_8m.stl",
+    "activeElementLengthMm": 30.0
+  },
+  {
+    "id": "emprint_150w_10m",
+    "label": "Emprint 150W / 10 min",
+    "templateFile": "Resources/geometries/08_emprint-150w_10m.stl",
+    "activeElementLengthMm": 30.0
+  }
+]

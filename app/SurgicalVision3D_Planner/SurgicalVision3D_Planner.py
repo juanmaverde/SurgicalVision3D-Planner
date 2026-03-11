@@ -7,6 +7,8 @@ import logging
 import math
 import subprocess
 import shutil
+import time
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -16,12 +18,14 @@ from xml.etree import ElementTree as ET
 
 import numpy as np
 import vtk
+from vtk.util import numpy_support
 
 import ctk
 import qt
 import slicer
 from slicer import (
     vtkMRMLMarkupsFiducialNode,
+    vtkMRMLMarkupsLineNode,
     vtkMRMLModelNode,
     vtkMRMLSegmentationNode,
     vtkMRMLTableNode,
@@ -54,6 +58,7 @@ GENERATED_PROBE_COORDINATION_SETTINGS_TABLE_ATTRIBUTE = "SurgicalVision3D_Planne
 GENERATED_PROBE_PAIR_COORDINATION_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedProbePairCoordinationTable"
 GENERATED_PROBE_COORDINATION_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedProbeCoordinationSummaryTable"
 GENERATED_NO_TOUCH_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedNoTouchSummaryTable"
+GENERATED_DERIVED_TRAJECTORY_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedDerivedTrajectoryBundleSummaryTable"
 GENERATED_EXPORT_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedExportSummaryTable"
 GENERATED_EXPORT_MANIFEST_PREVIEW_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedExportManifestPreviewTable"
 GENERATED_COHORT_EXECUTION_SUMMARY_TABLE_ATTRIBUTE = "SurgicalVision3D_Planner.GeneratedCohortExecutionSummaryTable"
@@ -97,6 +102,7 @@ MARGIN_TABLE_NODE_NAME = "SV3D Signed Margin Table"
 TEMP_PROBE_MODEL_NODE_NAME = "SV3D Temp Probe Margin Input"
 TEMP_TUMOR_MODEL_NODE_NAME = "SV3D Temp Tumor Margin Input"
 TRAJECTORY_SUMMARY_TABLE_NODE_NAME = "SV3D Trajectory Summary"
+DERIVED_TRAJECTORY_SUMMARY_TABLE_NODE_NAME = "SV3D Derived Trajectory Bundle Summary"
 PLAN_SUMMARY_TABLE_NODE_NAME = "SV3D Plan Summary"
 MARGIN_THRESHOLD_SUMMARY_TABLE_NODE_NAME = "SV3D Margin Threshold Summary"
 STRUCTURE_SAFETY_SUMMARY_TABLE_NODE_NAME = "SV3D Structure Safety Summary"
@@ -130,17 +136,27 @@ SAMPLE_DATA_ALREADY_REGISTERED = False
 BEGINNER_WORKFLOW_MODE = True
 BEGINNER_GEOMETRY_CATALOG_RELATIVE_PATH = "Resources/geometry_catalog.json"
 BEGINNER_WORKFLOW_BANNER_TEXT = (
-    "Beginner mode: import a case, define one master trajectory, validate it, assess MAM, then lock and derive coaxial guidance."
+    "Beginner mode: import a case, define one master trajectory, validate it, optionally run endpoint auto-adjust after a failed validation, assess MAM, then lock and derive coaxial guidance."
 )
 BEGINNER_MAM_COLOR_NODE_NAME = "SV3D Beginner MAM Colors"
 BEGINNER_TRAJECTORY_DISTANCE_SAMPLE_COUNT = 121
-BEGINNER_AUTO_ADAPT_PLACEHOLDER_TEXT = "Auto-adjust endpoint (later milestone)"
+BEGINNER_AUTO_ADJUST_ENDPOINT_BUTTON_TEXT = "Auto-adjust Endpoint"
+AUTO_ADJUST_MAX_ENDPOINT_SHIFT_MM = 15.0
+AUTO_ADJUST_ENDPOINT_SHIFT_STEP_MM = 1.5
+AUTO_ADJUST_AZIMUTH_SAMPLE_COUNT = 36
+DEFAULT_CT_ABDOMEN_WINDOW = 350.0
+DEFAULT_CT_ABDOMEN_LEVEL = 40.0
+EVALUATE_DERIVED_BUNDLE_INLINE_ON_PLACEMENT = False
 
 
 def _normalize_vector(vector: Sequence[float]) -> np.ndarray:
     normalized = np.array(vector, dtype=float)
+    if normalized.size != 3:
+        raise ValueError("Vector must have exactly 3 components.")
+    if not np.all(np.isfinite(normalized)):
+        raise ValueError("Cannot normalize a vector with non-finite values.")
     length = float(np.linalg.norm(normalized))
-    if length <= 1e-8:
+    if not math.isfinite(length) or length <= 1e-8:
         raise ValueError("Cannot normalize a zero-length vector.")
     return normalized / length
 
@@ -197,6 +213,10 @@ class ProbeTrajectory:
     label: str = ""
     status: str = "pending"
     sourceControlPointIndices: tuple[int, int] | None = None
+    role: str = "Master"
+    angleDeg: float | None = None
+    radialOffsetMm: float = 0.0
+    derivedFromMaster: bool = False
 
 
 @dataclass
@@ -378,7 +398,56 @@ class CoaxialPlanSummary:
     navigationTargetRAS: tuple[float, float, float]
     masterEntryPointRAS: tuple[float, float, float]
     masterTargetPointRAS: tuple[float, float, float]
+    spareMm: float = 0.0
+    pushThroughOffsetMm: float = 0.0
     notes: str = ""
+
+
+@dataclass
+class DerivedTrajectoryArrayConfig:
+    planningMode: str = "Single"
+    derivedTrajectoryCount: int = 4
+    radiusMm: float = 10.0
+    angleOffsetDeg: float = 0.0
+    includeMasterTrajectory: bool = True
+
+
+@dataclass
+class DerivedTrajectoryDescriptor:
+    trajectoryIndex: int
+    role: str
+    angleDeg: float
+    radialOffsetMm: float
+    source: str = "derived"
+
+
+@dataclass
+class DerivedTrajectoryArraySummary:
+    planningMode: str
+    masterIncluded: bool
+    derivedTrajectoryCount: int
+    totalTrajectoryCount: int
+    radiusMm: float
+    angleOffsetDeg: float
+    notes: str = ""
+
+
+@dataclass
+class EndpointAutoAdjustResult:
+    applied: bool
+    reason: str
+    statusText: str
+    maxEndpointShiftMm: float
+    shiftStepMm: float
+    azimuthSampleCount: int
+    checkedCandidateCount: int
+    insideTumorCandidateCount: int
+    zeroIntersectionCandidateCount: int
+    selectedEndpointShiftMm: float = 0.0
+    selectedMinDistanceMm: float = float("nan")
+    selectedTargetPointRAS: tuple[float, float, float] | None = None
+    selectedShellIndex: int = -1
+    selectedAzimuthIndex: int = -1
 
 
 #
@@ -491,6 +560,7 @@ class SurgicalVision3D_PlannerParameterNode:
     tumorTransform: vtkMRMLTransformNode | None = None
     coaxialNavigationTarget: vtkMRMLMarkupsFiducialNode | None = None
     trajectorySummaryTable: vtkMRMLTableNode | None = None
+    derivedTrajectorySummaryTable: vtkMRMLTableNode | None = None
     planSummaryTable: vtkMRMLTableNode | None = None
     marginThresholdSummaryTable: vtkMRMLTableNode | None = None
     structureSafetySummaryTable: vtkMRMLTableNode | None = None
@@ -511,9 +581,16 @@ class SurgicalVision3D_PlannerParameterNode:
     masterTrajectoryValidationTable: vtkMRMLTableNode | None = None
     masterPlanSnapshotTable: vtkMRMLTableNode | None = None
     coaxialPlanTable: vtkMRMLTableNode | None = None
+    derivedTrajectoryPreviewNode: vtkMRMLMarkupsLineNode | None = None
 
     createTrajectoryLinesOnPlacement: bool = True
     clearPreviousGeneratedProbes: bool = True
+    placeMultipleControlPoints: bool = True
+    trajectoryPlanningMode: Annotated[str, Choice(["Single", "MultiTrajectoryArray"])] = "Single"
+    derivedTrajectoryCount: int = 4
+    derivedTrajectoryRadiusMm: float = 10.0
+    derivedTrajectoryAngleOffsetDeg: float = 0.0
+    includeMasterTrajectoryInArray: bool = True
     mamMm: float = 10.0
     recolorThresholdLow: float = -10.0
     recolorThresholdMid: float = -5.0
@@ -568,10 +645,13 @@ class SurgicalVision3D_PlannerParameterNode:
     lastReproducibilityPackageSequence: int = 0
     masterTrajectoryLocked: bool = False
     coaxialTechnique: Annotated[str, Choice(["PullBack", "PushThrough"])] = "PullBack"
+    coaxialSpareMm: float = 5.0
 
     generatedProbeNodeIDs: str = "[]"
     generatedTrajectoryLineIDs: str = "[]"
+    derivedTrajectoryBundleSummaryJson: str = "{}"
     trajectoryValidationSummaryJson: str = "{}"
+    endpointAutoAdjustSummaryJson: str = "{}"
     mamAssessmentSummaryJson: str = "{}"
     masterPlanSnapshotJson: str = "{}"
     coaxialPlanSummaryJson: str = "{}"
@@ -612,17 +692,34 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         self._importCaseFolderButton = None
         self._openSegmentEditorButton = None
         self._geometryComboBox = None
+        self._planningModeComboBox = None
+        self._derivedTrajectoryCountSpinBox = None
+        self._derivedTrajectoryRadiusSpinBox = None
+        self._derivedTrajectoryAngleOffsetSpinBox = None
+        self._includeMasterTrajectoryCheckBox = None
+        self._previewDerivedArrayButton = None
+        self._clearDerivedArrayButton = None
+        self._derivedArrayStatusLabel = None
         self._mamSpinBox = None
         self._validateTrajectoryButton = None
+        self._autoAdjustEndpointButton = None
+        self._trajectoryRescueGuideLabel = None
         self._trajectoryValidationStatusLabel = None
         self._segmentEditorStatusLabel = None
         self._marginAssessmentStatusLabel = None
         self._lockMasterPlanButton = None
         self._resetMasterPlanButton = None
         self._coaxialTechniqueComboBox = None
+        self._coaxialSpareSpinBox = None
         self._computeCoaxialPlanButton = None
         self._coaxialStatusLabel = None
-        self._autoAdaptPlaceholderButton = None
+        self._placeMultipleControlPointsCheckBox = None
+        self._endpointsPlaceWidget = None
+        self._observedEndpointsMarkupsNode = None
+        self._observedEndpointsGeometrySignature = ""
+        self._sceneImportInProgress = False
+        self._sceneCloseInProgress = False
+        self._step123TraceSignature = ""
 
     def setup(self) -> None:
         ScriptedLoadableModuleWidget.setup(self)
@@ -659,6 +756,23 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
 
         self._configureNodeSelectorShowHidden(getattr(self.ui, "probeSegmentationSelector", None), True)
         self._configureNodeSelectorShowHidden(getattr(self.ui, "tumorSegmentationSelector", None), False)
+        self._configureNodeSelectorShowHidden(getattr(self.ui, "riskStructuresSegmentationSelector", None), False)
+        self._configureNodeSelectorNodeTypes(
+            getattr(self.ui, "probeSegmentationSelector", None),
+            ("vtkMRMLSegmentationNode",),
+        )
+        self._configureNodeSelectorNodeTypes(
+            getattr(self.ui, "tumorSegmentationSelector", None),
+            ("vtkMRMLSegmentationNode",),
+        )
+        self._configureNodeSelectorNodeTypes(
+            getattr(self.ui, "riskStructuresSegmentationSelector", None),
+            ("vtkMRMLSegmentationNode",),
+        )
+        self._configureNodeSelectorNodeTypes(
+            getattr(self.ui, "combinedProbeSegmentationSelector", None),
+            ("vtkMRMLSegmentationNode",),
+        )
 
         self.logic = SurgicalVision3D_PlannerLogic()
         self.logic.ensureReferenceProbeTemplatesLoaded()
@@ -667,6 +781,10 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
 
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneStartClose)
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
+        if hasattr(slicer.mrmlScene, "StartImportEvent"):
+            self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartImportEvent, self.onSceneStartImport)
+        if hasattr(slicer.mrmlScene, "EndImportEvent"):
+            self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndImportEvent, self.onSceneEndImport)
 
         if hasattr(self.ui, "loadSampleCaseButton"):
             self.ui.loadSampleCaseButton.connect("clicked(bool)", self.onLoadSampleCaseButton)
@@ -678,6 +796,12 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self.ui.nativeFiducialsSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onNativeFiducialsChanged)
         if hasattr(self.ui, "registeredFiducialsSelector"):
             self.ui.registeredFiducialsSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onRegisteredFiducialsChanged)
+        if hasattr(self.ui, "probeSegmentationSelector"):
+            self.ui.probeSegmentationSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onReferenceProbeSegmentationChanged)
+        if hasattr(self.ui, "tumorSegmentationSelector"):
+            self.ui.tumorSegmentationSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onTumorSegmentationChanged)
+        if hasattr(self.ui, "combinedProbeSegmentationSelector"):
+            self.ui.combinedProbeSegmentationSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onCombinedProbeSegmentationChanged)
         self.ui.placeProbesButton.connect("clicked(bool)", self.onPlaceProbesButton)
         self.ui.createTrajectoryLinesButton.connect("clicked(bool)", self.onCreateTrajectoryLinesButton)
         self.ui.mergeTranslatedProbesButton.connect("clicked(bool)", self.onMergeTranslatedProbesButton)
@@ -734,20 +858,43 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self._openSegmentEditorButton.connect("clicked(bool)", self.onOpenSegmentEditorButton)
         if self._geometryComboBox:
             self._geometryComboBox.connect("currentIndexChanged(int)", self.onSelectedGeometryChanged)
+        if self._planningModeComboBox:
+            self._planningModeComboBox.connect("currentIndexChanged(int)", self.onTrajectoryPlanningModeChanged)
+        if self._derivedTrajectoryCountSpinBox:
+            self._derivedTrajectoryCountSpinBox.connect("valueChanged(int)", self.onDerivedTrajectoryCountChanged)
+        if self._derivedTrajectoryRadiusSpinBox:
+            self._derivedTrajectoryRadiusSpinBox.connect("valueChanged(double)", self.onDerivedTrajectoryRadiusChanged)
+        if self._derivedTrajectoryAngleOffsetSpinBox:
+            self._derivedTrajectoryAngleOffsetSpinBox.connect("valueChanged(double)", self.onDerivedTrajectoryAngleOffsetChanged)
+        if self._includeMasterTrajectoryCheckBox:
+            self._includeMasterTrajectoryCheckBox.connect("toggled(bool)", self.onIncludeMasterTrajectoryInArrayToggled)
+        if self._previewDerivedArrayButton:
+            self._previewDerivedArrayButton.connect("clicked(bool)", self.onPreviewDerivedArrayButton)
+        if self._clearDerivedArrayButton:
+            self._clearDerivedArrayButton.connect("clicked(bool)", self.onClearDerivedArrayButton)
         if self._mamSpinBox:
             self._mamSpinBox.connect("valueChanged(double)", self.onMamValueChanged)
+        if self._placeMultipleControlPointsCheckBox:
+            self._placeMultipleControlPointsCheckBox.connect("toggled(bool)", self.onPlaceMultipleControlPointsToggled)
         if self._validateTrajectoryButton:
             self._validateTrajectoryButton.connect("clicked(bool)", self.onValidateTrajectoryButton)
+        if self._autoAdjustEndpointButton:
+            self._autoAdjustEndpointButton.connect("clicked(bool)", self.onAutoAdjustEndpointButton)
         if self._lockMasterPlanButton:
             self._lockMasterPlanButton.connect("clicked(bool)", self.onLockMasterPlanButton)
         if self._resetMasterPlanButton:
             self._resetMasterPlanButton.connect("clicked(bool)", self.onResetMasterPlanButton)
         if self._coaxialTechniqueComboBox:
             self._coaxialTechniqueComboBox.connect("currentIndexChanged(int)", self.onCoaxialTechniqueChanged)
+        if self._coaxialSpareSpinBox:
+            self._coaxialSpareSpinBox.connect("valueChanged(double)", self.onCoaxialSpareMmChanged)
         if self._computeCoaxialPlanButton:
             self._computeCoaxialPlanButton.connect("clicked(bool)", self.onComputeCoaxialPlanButton)
 
-        self.initializeParameterNode()
+        if self.parent.isEntered:
+            self.initializeParameterNode()
+        else:
+            self._updateButtonStates()
 
     def _createGitAgentDashboard(self, uiWidget) -> None:
         if not uiWidget or not uiWidget.layout():
@@ -814,6 +961,118 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         label.wordWrap = True
         return label
 
+    @staticmethod
+    def _statusLabelStyleForText(text: str) -> str:
+        normalizedText = str(text or "").strip().lower()
+        if normalizedText.startswith("blocked:"):
+            return "QLabel { color: #b71c1c; font-weight: 600; }"
+        if normalizedText.startswith("ready:"):
+            return "QLabel { color: #1b5e20; font-weight: 600; }"
+        return ""
+
+    def _setStatusLabelText(self, label, text: str) -> None:
+        if not label:
+            return
+        label.text = str(text or "")
+        label.setStyleSheet(self._statusLabelStyleForText(label.text))
+
+    @staticmethod
+    def _logStepTrace(stepName: str, message: str) -> None:
+        timestamp = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        traceLine = f"[SV3D_TRACE] {timestamp} [{stepName}] {message}"
+        try:
+            logging.info(traceLine)
+        except Exception:
+            print(traceLine)
+
+    @staticmethod
+    def _nodeDisplayName(node) -> str:
+        if not node:
+            return "(none)"
+        if not hasattr(node, "GetName"):
+            return "(unnamed)"
+        try:
+            nodeName = str(node.GetName() or "")
+        except Exception:
+            nodeName = ""
+        return nodeName if nodeName else "(unnamed)"
+
+    def _traceStep123State(self, source: str, force: bool = False) -> None:
+        if not BEGINNER_WORKFLOW_MODE:
+            return
+
+        sceneBusy = bool(self._sceneImportInProgress or self._sceneIsBusy())
+        if not self._parameterNode:
+            signature = f"{source}|busy:{int(sceneBusy)}|parameter:none"
+            if (not force) and signature == self._step123TraceSignature:
+                return
+            self._step123TraceSignature = signature
+            self._logStepTrace("Step1-3", f"{source}: parameter node unavailable (sceneBusy={sceneBusy}).")
+            return
+
+        nativeCount = self._markupsPointCount(self._parameterNode.nativeFiducials)
+        registeredCount = self._markupsPointCount(self._parameterNode.registeredFiducials)
+        registrationReady = bool(
+            self._parameterNode.tumorSegmentation
+            and self._parameterNode.nativeFiducials
+            and self._parameterNode.registeredFiducials
+            and nativeCount >= 3
+            and registeredCount >= 3
+            and nativeCount == registeredCount
+        )
+        hasTumorTransform = bool(
+            self._parameterNode.tumorSegmentation
+            and self._parameterNode.tumorSegmentation.GetTransformNodeID()
+        )
+        endpointCount = self._markupsPointCount(self._parameterNode.endpointsMarkups)
+        hasSingleMasterTrajectory = endpointCount == 2
+        planningMode = str(self._parameterNode.trajectoryPlanningMode or "Single")
+        isLocked = bool(self._parameterNode.masterTrajectoryLocked)
+        previewLineCount = 0
+        if self.logic:
+            previewLineCount = len(
+                self.logic.resolveExistingNodeIDs(
+                    self.logic.deserializeNodeIDs(self._parameterNode.generatedTrajectoryLineIDs)
+                )
+            )
+
+        signature = "|".join(
+            (
+                source,
+                f"busy:{int(sceneBusy)}",
+                f"tumor:{self._nodeDisplayName(self._parameterNode.tumorSegmentation)}",
+                f"critical:{self._nodeDisplayName(self._parameterNode.riskStructuresSegmentation)}",
+                f"native:{nativeCount}",
+                f"registered:{registeredCount}",
+                f"regready:{int(registrationReady)}",
+                f"hastransform:{int(hasTumorTransform)}",
+                f"endpoints:{self._nodeDisplayName(self._parameterNode.endpointsMarkups)}",
+                f"endpointcount:{endpointCount}",
+                f"singlemaster:{int(hasSingleMasterTrajectory)}",
+                f"mode:{planningMode}",
+                f"locked:{int(isLocked)}",
+                f"previewlines:{previewLineCount}",
+            )
+        )
+        if (not force) and signature == self._step123TraceSignature:
+            return
+        self._step123TraceSignature = signature
+
+        step1Ready = bool(self._parameterNode.tumorSegmentation and self._parameterNode.riskStructuresSegmentation)
+        self._logStepTrace(
+            "Step1-3",
+            (
+                f"{source}: Step1(imported={step1Ready}, "
+                f"tumor='{self._nodeDisplayName(self._parameterNode.tumorSegmentation)}', "
+                f"critical='{self._nodeDisplayName(self._parameterNode.riskStructuresSegmentation)}') | "
+                f"Step2(registrationReady={registrationReady}, nativePts={nativeCount}, "
+                f"registeredPts={registeredCount}, hasTransform={hasTumorTransform}) | "
+                f"Step3(endpoints='{self._nodeDisplayName(self._parameterNode.endpointsMarkups)}', "
+                f"points={endpointCount}, singleMaster={hasSingleMasterTrajectory}, "
+                f"planningMode='{planningMode}', locked={isLocked}, previewLines={previewLineCount})"
+            ),
+        )
+
     def _createBeginnerWorkflowUi(self, uiWidget) -> None:
         if not BEGINNER_WORKFLOW_MODE or not uiWidget or not uiWidget.layout() or len(self._beginnerWorkflowSections) > 0:
             return
@@ -854,27 +1113,76 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         trajectorySection.text = "Step 3 - Define Master Trajectory"
         trajectoryLayout = qt.QFormLayout(trajectorySection)
         trajectoryInstructionLabel = self._createStatusLabel(
-            "Use exactly two points in the markups node: entry point first, applicator endpoint second."
+            "Use exactly two points in the markups node: applicator endpoint first, entry point second."
         )
-        trajectoryLayout.addRow("Endpoint markups:", self.ui.endpointsMarkupsSelector)
+        self._endpointsPlaceWidget = None
+        if hasattr(slicer, "qSlicerMarkupsPlaceWidget"):
+            try:
+                self._endpointsPlaceWidget = slicer.qSlicerMarkupsPlaceWidget()
+                self._endpointsPlaceWidget.setMRMLScene(slicer.mrmlScene)
+                if hasattr(self._endpointsPlaceWidget, "setButtonsVisible"):
+                    self._endpointsPlaceWidget.setButtonsVisible(False)
+                elif hasattr(self._endpointsPlaceWidget, "buttonsVisible"):
+                    self._endpointsPlaceWidget.buttonsVisible = False
+                if hasattr(self._endpointsPlaceWidget, "placeButton"):
+                    placeButton = self._endpointsPlaceWidget.placeButton()
+                    if placeButton and hasattr(placeButton, "show"):
+                        placeButton.show()
+            except Exception:
+                self._endpointsPlaceWidget = None
+        self._placeMultipleControlPointsCheckBox = qt.QCheckBox("Place multiple control points")
+        self._placeMultipleControlPointsCheckBox.checked = True
+        endpointsRowWidget = self._buildButtonRowWidget(self.ui.endpointsMarkupsSelector, self._endpointsPlaceWidget)
+        trajectoryLayout.addRow("Endpoint markups:", endpointsRowWidget)
+        trajectoryLayout.addRow("", self._placeMultipleControlPointsCheckBox)
         trajectoryLayout.addRow("Instruction:", trajectoryInstructionLabel)
         trajectoryLayout.addRow("Preview:", self._buildButtonRowWidget(self.ui.createTrajectoryLinesButton))
+        self._setEndpointsPlaceWidgetNode(self.ui.endpointsMarkupsSelector.currentNode() if hasattr(self.ui, "endpointsMarkupsSelector") else None)
+        self._setEndpointsPlaceWidgetMultiplePlacement(True)
 
         validationSection = ctk.ctkCollapsibleButton()
-        validationSection.text = "Step 4 - Validate Trajectory"
+        validationSection.text = "Step 4 - Validate + Endpoint Rescue"
         validationLayout = qt.QFormLayout(validationSection)
         self._validateTrajectoryButton = qt.QPushButton("Validate Against Critical Structures")
         self._trajectoryValidationStatusLabel = self._createStatusLabel("Trajectory not validated.")
-        self._autoAdaptPlaceholderButton = qt.QPushButton(BEGINNER_AUTO_ADAPT_PLACEHOLDER_TEXT)
-        self._autoAdaptPlaceholderButton.enabled = False
+        self._autoAdjustEndpointButton = qt.QPushButton(BEGINNER_AUTO_ADJUST_ENDPOINT_BUTTON_TEXT)
+        self._trajectoryRescueGuideLabel = self._createStatusLabel(
+            "Available only after a failed validation. It moves endpoint only (entry fixed), keeps trajectory length fixed, "
+            f"and applies only when a zero-intersection endpoint is found inside tumor within {AUTO_ADJUST_MAX_ENDPOINT_SHIFT_MM:.1f} mm."
+        )
         validationLayout.addRow("Validation:", self._validateTrajectoryButton)
+        validationLayout.addRow("Rescue:", self._autoAdjustEndpointButton)
         validationLayout.addRow("Status:", self._trajectoryValidationStatusLabel)
-        validationLayout.addRow("Later:", self._autoAdaptPlaceholderButton)
+        validationLayout.addRow("Guide:", self._trajectoryRescueGuideLabel)
 
         applicatorSection = ctk.ctkCollapsibleButton()
-        applicatorSection.text = "Step 5 - Single Applicator Plan"
+        applicatorSection.text = "Step 5 - Applicator Plan"
         applicatorLayout = qt.QFormLayout(applicatorSection)
         self._geometryComboBox = qt.QComboBox()
+        self._planningModeComboBox = qt.QComboBox()
+        self._planningModeComboBox.addItem("Single trajectory", "Single")
+        self._planningModeComboBox.addItem("Multiple trajectories", "MultiTrajectoryArray")
+        self._derivedTrajectoryCountSpinBox = qt.QSpinBox()
+        self._derivedTrajectoryCountSpinBox.minimum = 1
+        self._derivedTrajectoryCountSpinBox.maximum = 24
+        self._derivedTrajectoryCountSpinBox.value = 4
+        self._derivedTrajectoryRadiusSpinBox = ctk.ctkDoubleSpinBox()
+        self._derivedTrajectoryRadiusSpinBox.minimum = 0.0
+        self._derivedTrajectoryRadiusSpinBox.maximum = 100.0
+        self._derivedTrajectoryRadiusSpinBox.decimals = 1
+        self._derivedTrajectoryRadiusSpinBox.singleStep = 0.5
+        self._derivedTrajectoryRadiusSpinBox.value = 10.0
+        self._derivedTrajectoryAngleOffsetSpinBox = ctk.ctkDoubleSpinBox()
+        self._derivedTrajectoryAngleOffsetSpinBox.minimum = -180.0
+        self._derivedTrajectoryAngleOffsetSpinBox.maximum = 180.0
+        self._derivedTrajectoryAngleOffsetSpinBox.decimals = 1
+        self._derivedTrajectoryAngleOffsetSpinBox.singleStep = 1.0
+        self._derivedTrajectoryAngleOffsetSpinBox.value = 0.0
+        self._includeMasterTrajectoryCheckBox = qt.QCheckBox("Include master trajectory in placement bundle")
+        self._includeMasterTrajectoryCheckBox.checked = True
+        self._previewDerivedArrayButton = qt.QPushButton("Preview Derived Array")
+        self._clearDerivedArrayButton = qt.QPushButton("Clear Derived Array")
+        self._derivedArrayStatusLabel = self._createStatusLabel("Array not generated.")
         self._mamSpinBox = ctk.ctkDoubleSpinBox()
         self._mamSpinBox.minimum = 0.0
         self._mamSpinBox.maximum = 50.0
@@ -883,6 +1191,16 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         self._mamSpinBox.value = 10.0
         self._marginAssessmentStatusLabel = self._createStatusLabel("MAM assessment not run.")
         applicatorLayout.addRow("Ablation geometry:", self._geometryComboBox)
+        applicatorLayout.addRow("Planning mode:", self._planningModeComboBox)
+        applicatorLayout.addRow("Derived trajectories:", self._derivedTrajectoryCountSpinBox)
+        applicatorLayout.addRow("Radius (mm):", self._derivedTrajectoryRadiusSpinBox)
+        applicatorLayout.addRow("Angle offset (deg):", self._derivedTrajectoryAngleOffsetSpinBox)
+        applicatorLayout.addRow("", self._includeMasterTrajectoryCheckBox)
+        applicatorLayout.addRow(
+            "Trajectory array:",
+            self._buildButtonRowWidget(self._previewDerivedArrayButton, self._clearDerivedArrayButton),
+        )
+        applicatorLayout.addRow("Array status:", self._derivedArrayStatusLabel)
         applicatorLayout.addRow("MAM (mm):", self._mamSpinBox)
         applicatorLayout.addRow(
             "Planning:",
@@ -898,10 +1216,17 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         self._coaxialTechniqueComboBox = qt.QComboBox()
         self._coaxialTechniqueComboBox.addItem("PullBack")
         self._coaxialTechniqueComboBox.addItem("PushThrough")
+        self._coaxialSpareSpinBox = ctk.ctkDoubleSpinBox()
+        self._coaxialSpareSpinBox.minimum = 0.0
+        self._coaxialSpareSpinBox.maximum = 20.0
+        self._coaxialSpareSpinBox.decimals = 1
+        self._coaxialSpareSpinBox.singleStep = 0.5
+        self._coaxialSpareSpinBox.value = 5.0
         self._computeCoaxialPlanButton = qt.QPushButton("Compute Coaxial Plan")
         self._coaxialStatusLabel = self._createStatusLabel("Coaxial plan not computed.")
         lockLayout.addRow("Locking:", self._buildButtonRowWidget(self._lockMasterPlanButton, self._resetMasterPlanButton))
         lockLayout.addRow("Technique:", self._coaxialTechniqueComboBox)
+        lockLayout.addRow("Spare (mm):", self._coaxialSpareSpinBox)
         lockLayout.addRow("Coaxial plan:", self._computeCoaxialPlanButton)
         lockLayout.addRow("Status:", self._coaxialStatusLabel)
 
@@ -1018,7 +1343,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
 
     def onGitStageAllButton(self) -> None:
         with slicer.util.tryWithErrorDisplay(_("Failed to stage changes."), waitCursor=False):
-            code, _, stderrText = self._runGitCommand("add", "-A")
+            code, _stdoutText, stderrText = self._runGitCommand("add", "-A")
             if code != 0:
                 raise RuntimeError(stderrText or "git add -A failed.")
             self._appendGitAgentLogEntry("STAGE", "Staged all changes with git add -A.")
@@ -1074,13 +1399,254 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             node.SetName(slicer.mrmlScene.GenerateUniqueName(preferredBaseName))
 
     def onEndpointsMarkupsChanged(self, node) -> None:
+        if self._sceneImportInProgress or self._sceneIsBusy():
+            self._setEndpointsPlaceWidgetNode(node)
+            self._setObservedEndpointsMarkupsNode(node)
+            return
         self._renameGenericFiducialsNode(node, "endpoints")
+        if self._parameterNode and node and self._parameterNode.endpointsMarkups is not node:
+            self._parameterNode.endpointsMarkups = node
+            self._invalidateGeneratedPlanningOutputs(
+                "master trajectory source node changed. Re-preview and re-place probes.",
+                invalidateMasterValidation=True,
+            )
+        if BEGINNER_WORKFLOW_MODE:
+            pointCount = int(node.GetNumberOfControlPoints()) if node and hasattr(node, "GetNumberOfControlPoints") else 0
+            self._logStepTrace("Step3", f"Endpoint markup node selected: '{node.GetName() if node else '(none)'}' ({pointCount} points)")
+        self._setEndpointsPlaceWidgetNode(node)
+        self._setObservedEndpointsMarkupsNode(node)
+        self._autoSeedRegistrationFiducialsFromEndpoints()
+        self._updateButtonStates()
 
     def onNativeFiducialsChanged(self, node) -> None:
         self._renameGenericFiducialsNode(node, "NativeFiducials")
 
     def onRegisteredFiducialsChanged(self, node) -> None:
         self._renameGenericFiducialsNode(node, "RegisteredFiducials")
+
+    def onReferenceProbeSegmentationChanged(self, node) -> None:
+        selector = getattr(self.ui, "probeSegmentationSelector", None) if hasattr(self, "ui") else None
+        sanitizedNode = self._sanitizeSelectorNodeClass(
+            selector,
+            node,
+            "vtkMRMLSegmentationNode",
+            "probeSegmentationSelector",
+        )
+        if not self._parameterNode:
+            return
+        if self._sceneImportInProgress or self._sceneIsBusy():
+            return
+        if self._parameterNode.referenceProbeSegmentation is sanitizedNode:
+            return
+        self._parameterNode.referenceProbeSegmentation = sanitizedNode
+        self._invalidateGeneratedPlanningOutputs("probe template changed. Re-preview and re-place probes.")
+        self._updateButtonStates()
+
+    def onTumorSegmentationChanged(self, node) -> None:
+        selector = getattr(self.ui, "tumorSegmentationSelector", None) if hasattr(self, "ui") else None
+        sanitizedNode = self._sanitizeSelectorNodeClass(
+            selector,
+            node,
+            "vtkMRMLSegmentationNode",
+            "tumorSegmentationSelector",
+        )
+        if not self._parameterNode:
+            return
+        if self._sceneImportInProgress or self._sceneIsBusy():
+            return
+        if self._parameterNode.tumorSegmentation is sanitizedNode:
+            return
+        self._parameterNode.tumorSegmentation = sanitizedNode
+        self._clearOwnedSafetyOutputs(clearReferences=True)
+        self._clearOwnedBeginnerOutputs(clearReferences=True)
+        self._updateButtonStates()
+
+    def onCombinedProbeSegmentationChanged(self, node) -> None:
+        selector = getattr(self.ui, "combinedProbeSegmentationSelector", None) if hasattr(self, "ui") else None
+        sanitizedNode = self._sanitizeSelectorNodeClass(
+            selector,
+            node,
+            "vtkMRMLSegmentationNode",
+            "combinedProbeSegmentationSelector",
+        )
+        if not self._parameterNode:
+            return
+        if self._sceneImportInProgress or self._sceneIsBusy():
+            return
+        if self._parameterNode.combinedProbeSegmentation is sanitizedNode:
+            return
+        self._parameterNode.combinedProbeSegmentation = sanitizedNode
+        self._updateButtonStates()
+
+    @staticmethod
+    def _setPlaceModePersistence(enabled: bool) -> None:
+        appLogic = slicer.app.applicationLogic() if hasattr(slicer, "app") else None
+        interactionNode = appLogic.GetInteractionNode() if appLogic and hasattr(appLogic, "GetInteractionNode") else None
+        if interactionNode and hasattr(interactionNode, "SetPlaceModePersistence"):
+            interactionNode.SetPlaceModePersistence(1 if enabled else 0)
+
+    def _setEndpointsPlaceWidgetNode(self, markupsNode) -> None:
+        if not self._endpointsPlaceWidget or not hasattr(self._endpointsPlaceWidget, "setCurrentNode"):
+            return
+        try:
+            self._endpointsPlaceWidget.setCurrentNode(markupsNode)
+        except Exception:
+            pass
+
+    def _setEndpointsPlaceWidgetMultiplePlacement(self, enabled: bool) -> None:
+        if not self._endpointsPlaceWidget:
+            return
+        placeWidgetClass = getattr(slicer, "qSlicerMarkupsPlaceWidget", None)
+        if (
+            placeWidgetClass
+            and hasattr(placeWidgetClass, "ForcePlaceMultipleMarkups")
+            and hasattr(placeWidgetClass, "ForcePlaceSingleMarkup")
+            and hasattr(self._endpointsPlaceWidget, "placeMultipleMarkups")
+        ):
+            try:
+                self._endpointsPlaceWidget.placeMultipleMarkups = (
+                    placeWidgetClass.ForcePlaceMultipleMarkups
+                    if enabled
+                    else placeWidgetClass.ForcePlaceSingleMarkup
+                )
+                return
+            except Exception:
+                pass
+        if hasattr(self._endpointsPlaceWidget, "setPlaceModePersistency"):
+            try:
+                self._endpointsPlaceWidget.setPlaceModePersistency(bool(enabled))
+            except Exception:
+                pass
+
+    @staticmethod
+    def _markupsPointCount(markupsNode) -> int:
+        if not markupsNode:
+            return 0
+        if hasattr(markupsNode, "GetNumberOfDefinedControlPoints"):
+            return int(markupsNode.GetNumberOfDefinedControlPoints())
+        if hasattr(markupsNode, "GetNumberOfControlPoints"):
+            return int(markupsNode.GetNumberOfControlPoints())
+        return 0
+
+    @staticmethod
+    def _endpointsGeometrySignature(markupsNode) -> str:
+        if not markupsNode:
+            return ""
+        if not hasattr(markupsNode, "GetNumberOfControlPoints"):
+            return ""
+        signatureParts: list[str] = [f"count:{int(markupsNode.GetNumberOfControlPoints())}"]
+        pointPosition = [0.0, 0.0, 0.0]
+        for pointIndex in range(int(markupsNode.GetNumberOfControlPoints())):
+            pointStatus = 1
+            if hasattr(markupsNode, "GetNthControlPointPositionStatus"):
+                try:
+                    pointStatus = int(markupsNode.GetNthControlPointPositionStatus(pointIndex))
+                except Exception:
+                    pointStatus = 1
+            markupsNode.GetNthControlPointPosition(pointIndex, pointPosition)
+            signatureParts.append(
+                f"{pointStatus}:{pointPosition[0]:.4f},{pointPosition[1]:.4f},{pointPosition[2]:.4f}"
+            )
+        return "|".join(signatureParts)
+
+    def _setObservedEndpointsMarkupsNode(self, markupsNode) -> None:
+        if self._observedEndpointsMarkupsNode is markupsNode:
+            return
+        if self._observedEndpointsMarkupsNode:
+            self.removeObserver(
+                self._observedEndpointsMarkupsNode,
+                vtk.vtkCommand.ModifiedEvent,
+                self._onEndpointsMarkupsModified,
+            )
+        self._observedEndpointsMarkupsNode = markupsNode
+        self._observedEndpointsGeometrySignature = self._endpointsGeometrySignature(markupsNode)
+        if self._observedEndpointsMarkupsNode:
+            self.addObserver(
+                self._observedEndpointsMarkupsNode,
+                vtk.vtkCommand.ModifiedEvent,
+                self._onEndpointsMarkupsModified,
+            )
+
+    def _onEndpointsMarkupsModified(self, caller=None, event=None) -> None:
+        if self._sceneImportInProgress or self._sceneIsBusy():
+            return
+        if not self._parameterNode:
+            return
+        if caller and self._parameterNode.endpointsMarkups is not caller:
+            self._parameterNode.endpointsMarkups = caller
+        geometrySignature = self._endpointsGeometrySignature(caller if caller else self._parameterNode.endpointsMarkups)
+        geometryChanged = geometrySignature != self._observedEndpointsGeometrySignature
+        self._observedEndpointsGeometrySignature = geometrySignature
+        if geometryChanged:
+            if BEGINNER_WORKFLOW_MODE and caller and hasattr(caller, "GetNumberOfControlPoints"):
+                pointCount = int(caller.GetNumberOfControlPoints())
+                self._logStepTrace("Step3", f"Master trajectory control points updated: {pointCount}")
+            self._invalidateGeneratedPlanningOutputs(
+                "master trajectory edited. Re-preview and re-place probes.",
+                invalidateMasterValidation=True,
+            )
+        self._autoSeedRegistrationFiducialsFromEndpoints()
+        self._updateButtonStates()
+
+    @staticmethod
+    def _autoRegistrationFiducialPointsFromEndpoints(endpointsMarkups) -> np.ndarray | None:
+        if not endpointsMarkups or int(endpointsMarkups.GetNumberOfControlPoints()) < 2:
+            return None
+
+        endpointPoint = [0.0, 0.0, 0.0]
+        entryPoint = [0.0, 0.0, 0.0]
+        endpointsMarkups.GetNthControlPointPosition(0, endpointPoint)
+        endpointsMarkups.GetNthControlPointPosition(1, entryPoint)
+        endpointVector = np.array(endpointPoint, dtype=float)
+        entryVector = np.array(entryPoint, dtype=float)
+        axisVector = endpointVector - entryVector
+        axisNorm = float(np.linalg.norm(axisVector))
+        if axisNorm <= 1e-6:
+            return None
+        axisDirection = axisVector / axisNorm
+
+        orthogonalSeed = np.array([0.0, 0.0, 1.0], dtype=float)
+        if abs(float(np.dot(axisDirection, orthogonalSeed))) > 0.95:
+            orthogonalSeed = np.array([0.0, 1.0, 0.0], dtype=float)
+        orthogonalDirection = np.cross(axisDirection, orthogonalSeed)
+        orthogonalNorm = float(np.linalg.norm(orthogonalDirection))
+        if orthogonalNorm <= 1e-6:
+            orthogonalSeed = np.array([1.0, 0.0, 0.0], dtype=float)
+            orthogonalDirection = np.cross(axisDirection, orthogonalSeed)
+            orthogonalNorm = float(np.linalg.norm(orthogonalDirection))
+            if orthogonalNorm <= 1e-6:
+                return None
+        orthogonalDirection /= orthogonalNorm
+
+        midpoint = 0.5 * (endpointVector + entryVector)
+        anchorOffsetMm = min(max(axisNorm * 0.25, 3.0), 12.0)
+        anchorPoint = midpoint + (orthogonalDirection * anchorOffsetMm)
+        return np.array([endpointVector, entryVector, anchorPoint], dtype=float)
+
+    def _autoSeedRegistrationFiducialsFromEndpoints(self) -> bool:
+        if not self._parameterNode:
+            return False
+        endpointsMarkups = self._parameterNode.endpointsMarkups
+        nativeFiducials = self._parameterNode.nativeFiducials
+        registeredFiducials = self._parameterNode.registeredFiducials
+        if not endpointsMarkups or not nativeFiducials or not registeredFiducials:
+            return False
+        if self._markupsPointCount(nativeFiducials) > 0 or self._markupsPointCount(registeredFiducials) > 0:
+            return False
+
+        seededPoints = self._autoRegistrationFiducialPointsFromEndpoints(endpointsMarkups)
+        if seededPoints is None:
+            return False
+        slicer.util.updateMarkupsControlPointsFromArray(nativeFiducials, seededPoints)
+        slicer.util.updateMarkupsControlPointsFromArray(registeredFiducials, seededPoints)
+        fiducialLabels = ("Auto Endpoint", "Auto Entry", "Auto Anchor")
+        for markupsNode in (nativeFiducials, registeredFiducials):
+            if hasattr(markupsNode, "SetAttribute"):
+                markupsNode.SetAttribute("SV3D.AutoSeededFromEndpoints", "1")
+            if hasattr(markupsNode, "SetNthControlPointLabel"):
+                for controlPointIndex, controlPointLabel in enumerate(fiducialLabels):
+                    markupsNode.SetNthControlPointLabel(controlPointIndex, controlPointLabel)
+        return True
 
     @staticmethod
     def _configureNodeSelectorShowHidden(selector, showHidden: bool) -> None:
@@ -1091,6 +1657,50 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             return
         if hasattr(selector, "showHidden"):
             selector.showHidden = bool(showHidden)
+
+    @staticmethod
+    def _configureNodeSelectorNodeTypes(selector, nodeTypes: Sequence[str]) -> None:
+        if not selector:
+            return
+        resolvedNodeTypes = [str(nodeType) for nodeType in nodeTypes if str(nodeType)]
+        if hasattr(selector, "setNodeTypes"):
+            selector.setNodeTypes(resolvedNodeTypes)
+            return
+        if hasattr(selector, "nodeTypes"):
+            selector.nodeTypes = resolvedNodeTypes
+
+    @staticmethod
+    def _selectorNodeMatchesClass(node, expectedClassName: str) -> bool:
+        return bool(node and hasattr(node, "IsA") and node.IsA(expectedClassName))
+
+    def _sanitizeSelectorNodeClass(
+        self,
+        selector,
+        node,
+        expectedClassName: str,
+        selectorLabel: str,
+    ):
+        if not node:
+            return None
+        if self._selectorNodeMatchesClass(node, expectedClassName):
+            return node
+        logging.warning(
+            "Ignoring invalid node type on selector '%s': expected %s, got %s (%s).",
+            selectorLabel,
+            expectedClassName,
+            str(node.GetClassName() if hasattr(node, "GetClassName") else type(node).__name__),
+            str(node.GetName() if hasattr(node, "GetName") else "unnamed"),
+        )
+        if selector and hasattr(selector, "setCurrentNode"):
+            wasBlocked = bool(selector.blockSignals(True)) if hasattr(selector, "blockSignals") else False
+            try:
+                selector.setCurrentNode(None)
+            except Exception:
+                pass
+            finally:
+                if hasattr(selector, "blockSignals"):
+                    selector.blockSignals(wasBlocked)
+        return None
 
     def _populateSampleCaseComboBox(self) -> None:
         if not self.logic or not hasattr(self.ui, "sampleCaseComboBox"):
@@ -1133,6 +1743,17 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self._mamSpinBox.value = float(self._parameterNode.mamMm)
             self._mamSpinBox.blockSignals(False)
 
+        if self._placeMultipleControlPointsCheckBox:
+            targetChecked = bool(self._parameterNode.placeMultipleControlPoints)
+            if bool(self._placeMultipleControlPointsCheckBox.checked) != targetChecked:
+                self._placeMultipleControlPointsCheckBox.blockSignals(True)
+                self._placeMultipleControlPointsCheckBox.checked = targetChecked
+                self._placeMultipleControlPointsCheckBox.blockSignals(False)
+            self._setPlaceModePersistence(targetChecked)
+            self._setEndpointsPlaceWidgetMultiplePlacement(targetChecked)
+        self._setEndpointsPlaceWidgetNode(self._parameterNode.endpointsMarkups)
+        self._setObservedEndpointsMarkupsNode(self._parameterNode.endpointsMarkups)
+
         if self._coaxialTechniqueComboBox:
             targetTechnique = str(self._parameterNode.coaxialTechnique or "PullBack")
             targetIndex = self._coaxialTechniqueComboBox.findText(targetTechnique)
@@ -1140,6 +1761,12 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 self._coaxialTechniqueComboBox.blockSignals(True)
                 self._coaxialTechniqueComboBox.currentIndex = targetIndex
                 self._coaxialTechniqueComboBox.blockSignals(False)
+        if self._coaxialSpareSpinBox:
+            targetSpareMm = float(self._parameterNode.coaxialSpareMm)
+            if not math.isclose(float(self._coaxialSpareSpinBox.value), targetSpareMm, abs_tol=1e-6):
+                self._coaxialSpareSpinBox.blockSignals(True)
+                self._coaxialSpareSpinBox.value = targetSpareMm
+                self._coaxialSpareSpinBox.blockSignals(False)
 
         if self._geometryComboBox:
             targetGeometryId = str(self._parameterNode.selectedGeometryId or "")
@@ -1152,20 +1779,57 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                     self._geometryComboBox.currentIndex = targetIndex
                     self._geometryComboBox.blockSignals(False)
 
+        if self._planningModeComboBox:
+            targetPlanningMode = str(self._parameterNode.trajectoryPlanningMode or "Single")
+            targetIndex = self._planningModeComboBox.findData(targetPlanningMode)
+            if targetIndex >= 0 and targetIndex != self._planningModeComboBox.currentIndex:
+                self._planningModeComboBox.blockSignals(True)
+                self._planningModeComboBox.currentIndex = targetIndex
+                self._planningModeComboBox.blockSignals(False)
+        if self._derivedTrajectoryCountSpinBox:
+            targetCount = int(max(1, int(self._parameterNode.derivedTrajectoryCount)))
+            if int(self._derivedTrajectoryCountSpinBox.value) != targetCount:
+                self._derivedTrajectoryCountSpinBox.blockSignals(True)
+                self._derivedTrajectoryCountSpinBox.value = targetCount
+                self._derivedTrajectoryCountSpinBox.blockSignals(False)
+        if self._derivedTrajectoryRadiusSpinBox:
+            targetRadiusMm = float(max(0.0, float(self._parameterNode.derivedTrajectoryRadiusMm)))
+            if not math.isclose(float(self._derivedTrajectoryRadiusSpinBox.value), targetRadiusMm, abs_tol=1e-6):
+                self._derivedTrajectoryRadiusSpinBox.blockSignals(True)
+                self._derivedTrajectoryRadiusSpinBox.value = targetRadiusMm
+                self._derivedTrajectoryRadiusSpinBox.blockSignals(False)
+        if self._derivedTrajectoryAngleOffsetSpinBox:
+            targetAngleOffsetDeg = float(self._parameterNode.derivedTrajectoryAngleOffsetDeg)
+            if not math.isclose(float(self._derivedTrajectoryAngleOffsetSpinBox.value), targetAngleOffsetDeg, abs_tol=1e-6):
+                self._derivedTrajectoryAngleOffsetSpinBox.blockSignals(True)
+                self._derivedTrajectoryAngleOffsetSpinBox.value = targetAngleOffsetDeg
+                self._derivedTrajectoryAngleOffsetSpinBox.blockSignals(False)
+        if self._includeMasterTrajectoryCheckBox:
+            includeMaster = bool(self._parameterNode.includeMasterTrajectoryInArray)
+            if bool(self._includeMasterTrajectoryCheckBox.checked) != includeMaster:
+                self._includeMasterTrajectoryCheckBox.blockSignals(True)
+                self._includeMasterTrajectoryCheckBox.checked = includeMaster
+                self._includeMasterTrajectoryCheckBox.blockSignals(False)
+
         trajectorySummary = self._jsonSummary(self._parameterNode.trajectoryValidationSummaryJson)
+        autoAdjustSummary = self._jsonSummary(self._parameterNode.endpointAutoAdjustSummaryJson)
         if self._trajectoryValidationStatusLabel:
-            self._trajectoryValidationStatusLabel.text = str(
-                trajectorySummary.get("StatusText", "Trajectory not validated.")
+            autoAdjustStatusText = str(autoAdjustSummary.get("statusText", autoAdjustSummary.get("StatusText", ""))).strip()
+            self._setStatusLabelText(
+                self._trajectoryValidationStatusLabel,
+                autoAdjustStatusText or str(trajectorySummary.get("StatusText", "Trajectory not validated.")),
             )
         mamSummary = self._jsonSummary(self._parameterNode.mamAssessmentSummaryJson)
         if self._marginAssessmentStatusLabel:
-            self._marginAssessmentStatusLabel.text = str(
-                mamSummary.get("StatusText", "MAM assessment not run.")
+            self._setStatusLabelText(
+                self._marginAssessmentStatusLabel,
+                str(mamSummary.get("StatusText", "MAM assessment not run.")),
             )
         coaxialSummary = self._jsonSummary(self._parameterNode.coaxialPlanSummaryJson)
         if self._coaxialStatusLabel:
-            self._coaxialStatusLabel.text = str(
-                coaxialSummary.get("notes", "Coaxial plan not computed.")
+            self._setStatusLabelText(
+                self._coaxialStatusLabel,
+                str(coaxialSummary.get("notes", "Coaxial plan not computed.")),
             )
 
     @staticmethod
@@ -1173,9 +1837,27 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         if widget and hasattr(widget, "setVisible"):
             widget.setVisible(bool(visible))
 
-    def _setUiWidgetsVisible(self, widgetNames: Sequence[str], visible: bool) -> None:
+    def _setUiWidgetsVisible(self, widgetNames: Sequence[str], visible: bool, uiWidget=None) -> None:
         for widgetName in widgetNames:
-            self._setWidgetVisible(getattr(self.ui, widgetName, None), visible)
+            widget = getattr(self.ui, widgetName, None)
+            if widget is None and uiWidget and hasattr(uiWidget, "findChild"):
+                widget = uiWidget.findChild(qt.QWidget, str(widgetName))
+            self._setWidgetVisible(widget, visible)
+
+    def _setCollapsibleButtonsVisibleByText(self, uiWidget, buttonTexts: Sequence[str], visible: bool) -> None:
+        if not uiWidget or not hasattr(uiWidget, "findChildren"):
+            return
+        targetTexts = {
+            str(buttonText or "").strip()
+            for buttonText in buttonTexts
+            if str(buttonText or "").strip()
+        }
+        if not targetTexts:
+            return
+        for collapsibleButton in uiWidget.findChildren(ctk.ctkCollapsibleButton):
+            collapsibleText = str(getattr(collapsibleButton, "text", "") or "").strip()
+            if collapsibleText in targetTexts:
+                self._setWidgetVisible(collapsibleButton, visible)
 
     def _applyBeginnerWorkflowMode(self, uiWidget) -> None:
         if not BEGINNER_WORKFLOW_MODE:
@@ -1198,6 +1880,19 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 "cohortCollapsibleButton",
                 "reproducibilityCollapsibleButton",
                 "exportCollapsibleButton",
+            ),
+            False,
+            uiWidget=uiWidget,
+        )
+        self._setCollapsibleButtonsVisibleByText(
+            uiWidget,
+            (
+                "Probe Planning Inputs",
+                "Tumor Registration",
+                "Ablation Margin Evaluation",
+                "Cohort / Study Evaluation",
+                "Reproducibility Package",
+                "Export",
             ),
             False,
         )
@@ -1243,6 +1938,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 "probeCoordinationStatusLabel",
             ),
             False,
+            uiWidget=uiWidget,
         )
         if hasattr(self.ui, "placeProbesButton"):
             self.ui.placeProbesButton.text = "Place Single Applicator"
@@ -1268,8 +1964,8 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 "into this selector. The template is expected to be oriented along local -Z."
             ),
             "endpointsMarkupsSelector": (
-                "Select trajectory endpoints as ordered entry/target pairs with an even number of control points: "
-                "entry1,target1,entry2,target2,..."
+                "Select trajectory endpoints as ordered endpoint/entry pairs with an even number of control points: "
+                "endpoint1,entry1,endpoint2,entry2,..."
             ),
             "tumorSegmentationSelector": (
                 "Select the tumor/target segmentation used for margin evaluation, coverage context, and no-touch checks."
@@ -1381,13 +2077,13 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             "sampleCaseComboBox": "Pick a sample case first, then click Load.",
             "loadSampleCaseButton": "Load the selected sample scene.",
             "probeSegmentationSelector": "Choose the probe template geometry to place on each trajectory.",
-            "endpointsMarkupsSelector": "Choose exactly two points: entry first, applicator endpoint second.",
+            "endpointsMarkupsSelector": "Choose exactly two points: applicator endpoint first, entry point second.",
             "tumorSegmentationSelector": "Choose the target tumor segmentation for margin evaluation.",
             "riskStructuresSegmentationSelector": "Choose the segmentation that contains the critical structures to avoid.",
             "placeProbesButton": "Create probe instances from endpoint pairs.",
             "mergeTranslatedProbesButton": "Union the placed probes into one combined ablation zone.",
             "evaluateMarginsButton": "Compute signed margins between the target tumor and the combined ablation zone.",
-            "createTrajectoryLinesButton": "Preview the current single master trajectory as a line.",
+            "createTrajectoryLinesButton": "Preview the currently planned trajectory set (master only or master + derived array).",
             "registerTumorButton": "Apply fiducial-based rigid registration to the tumor segmentation.",
             "hardenTumorTransformButton": "Make the current tumor registration permanent.",
         }
@@ -1403,16 +2099,51 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self._openSegmentEditorButton.setToolTip("Open Slicer Segment Editor to create or refine tumor and critical-structure segments.")
         if self._geometryComboBox:
             self._geometryComboBox.setToolTip("Choose a predefined ablation geometry. Each entry also defines the active-element length.")
+        if self._planningModeComboBox:
+            self._planningModeComboBox.setToolTip("Single uses only the master trajectory. Multiple generates a deterministic parallel array.")
+        if self._derivedTrajectoryCountSpinBox:
+            self._derivedTrajectoryCountSpinBox.setToolTip(
+                "Number of derived child trajectories distributed around the master (children only)."
+            )
+        if self._derivedTrajectoryRadiusSpinBox:
+            self._derivedTrajectoryRadiusSpinBox.setToolTip("Radial offset in mm from the master trajectory to each child trajectory.")
+        if self._derivedTrajectoryAngleOffsetSpinBox:
+            self._derivedTrajectoryAngleOffsetSpinBox.setToolTip("Global angular offset in degrees applied to the derived trajectory ring.")
+        if self._includeMasterTrajectoryCheckBox:
+            self._includeMasterTrajectoryCheckBox.setToolTip("Include/exclude the master trajectory when placing the generated bundle.")
+        if self._previewDerivedArrayButton:
+            self._previewDerivedArrayButton.setToolTip(
+                "Generate and preview deterministic derived trajectories after master trajectory validation."
+            )
+        if self._clearDerivedArrayButton:
+            self._clearDerivedArrayButton.setToolTip("Clear derived trajectory preview lines and derived-bundle summary outputs.")
         if self._mamSpinBox:
             self._mamSpinBox.setToolTip("Minimal Ablative Margin in mm. Default is 10 mm.")
+        if self._placeMultipleControlPointsCheckBox:
+            self._placeMultipleControlPointsCheckBox.setToolTip(
+                "Keep markup placement active after each click so you can place endpoint/entry points consecutively."
+            )
+        if self._endpointsPlaceWidget:
+            self._endpointsPlaceWidget.setToolTip(
+                "Place endpoint/entry control points directly from this module."
+            )
         if self._validateTrajectoryButton:
             self._validateTrajectoryButton.setToolTip("Check whether the master trajectory intersects any critical-structure segment.")
+        if self._autoAdjustEndpointButton:
+            self._autoAdjustEndpointButton.setToolTip(
+                "Available only after failed validation. Moves endpoint only (entry fixed), keeps trajectory length fixed, "
+                f"and applies only if a zero-intersection endpoint is found inside tumor within {AUTO_ADJUST_MAX_ENDPOINT_SHIFT_MM:.1f} mm."
+            )
         if self._lockMasterPlanButton:
             self._lockMasterPlanButton.setToolTip("Lock the current validated master trajectory and save its snapshot.")
         if self._resetMasterPlanButton:
             self._resetMasterPlanButton.setToolTip("Unlock the master plan and clear the saved lock/coaxial outputs.")
         if self._coaxialTechniqueComboBox:
             self._coaxialTechniqueComboBox.setToolTip("Choose how the coaxial sheath and applicator are coordinated.")
+        if self._coaxialSpareSpinBox:
+            self._coaxialSpareSpinBox.setToolTip(
+                "Additional depth reserve in mm for push-through guidance (offset = active element + spare)."
+            )
         if self._computeCoaxialPlanButton:
             self._computeCoaxialPlanButton.setToolTip("Derive the coaxial navigation target for the selected technique.")
 
@@ -1420,25 +2151,80 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         self.removeObservers()
 
     def enter(self) -> None:
+        if (
+            self._parameterNode
+            and self._parameterNodeGuiTag is not None
+            and not self._sceneImportInProgress
+            and not self._sceneIsBusy()
+        ):
+            self._updateButtonStates()
+            return
         self.initializeParameterNode()
 
     def exit(self) -> None:
         if self._parameterNode:
-            if self._parameterNodeGuiTag is not None:
-                self._parameterNode.disconnectGui(self._parameterNodeGuiTag)
+            self._disconnectParameterNodeGui()
             self._parameterNodeGuiTag = None
             self.removeObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._updateButtonStates)
+        self._setObservedEndpointsMarkupsNode(None)
+
+    def _disconnectParameterNodeGui(self) -> None:
+        if self._parameterNode and self._parameterNodeGuiTag is not None:
+            try:
+                self._parameterNode.disconnectGui(self._parameterNodeGuiTag)
+            except Exception:
+                pass
+            self._parameterNodeGuiTag = None
 
     def onSceneStartClose(self, caller, event) -> None:
+        self._sceneCloseInProgress = True
+        self._step123TraceSignature = ""
+        self._logStepTrace("Runtime", "Scene close started.")
         self.setParameterNode(None)
 
+    def onSceneStartImport(self, caller, event) -> None:
+        self._sceneImportInProgress = True
+        self._step123TraceSignature = ""
+        self._disconnectParameterNodeGui()
+        self._logStepTrace("Runtime", "Scene import started.")
+
+    def _sceneIsBusy(self) -> bool:
+        if self._sceneCloseInProgress:
+            return True
+        scene = slicer.mrmlScene
+        if hasattr(scene, "IsClosing") and bool(scene.IsClosing()):
+            return True
+        if hasattr(scene, "IsImporting") and bool(scene.IsImporting()):
+            return True
+        if hasattr(scene, "IsBatchProcessing") and bool(scene.IsBatchProcessing()):
+            return True
+        return False
+
+    def _initializeParameterNodeWhenSceneReady(self) -> None:
+        if not self.parent.isEntered:
+            return
+        if self._sceneImportInProgress or self._sceneIsBusy():
+            self._traceStep123State("_initializeParameterNodeWhenSceneReady", force=False)
+            return
+        self.initializeParameterNode()
+
     def onSceneEndClose(self, caller, event) -> None:
-        if self.parent.isEntered:
-            self.initializeParameterNode()
+        self._sceneCloseInProgress = False
+        self._logStepTrace("Runtime", "Scene close finished.")
+        qt.QTimer.singleShot(0, self._initializeParameterNodeWhenSceneReady)
+
+    def onSceneEndImport(self, caller, event) -> None:
+        self._sceneImportInProgress = False
+        self._logStepTrace("Runtime", "Scene import finished.")
+        qt.QTimer.singleShot(0, self._initializeParameterNodeWhenSceneReady)
 
     def initializeParameterNode(self) -> None:
         if not self.logic:
             return
+        if self._sceneImportInProgress or self._sceneIsBusy():
+            self._traceStep123State("initializeParameterNode(scene busy)", force=False)
+            return
+        self._logStepTrace("Runtime", "initializeParameterNode started.")
         templateNodes = self.logic.ensureReferenceProbeTemplatesLoaded()
         parameterNode = self.logic.getParameterNode()
         self._preloadNamedSceneInputs(parameterNode)
@@ -1456,10 +2242,20 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         if not parameterNode.selectedGeometryId and self._geometryComboBox and self._geometryComboBox.count > 0:
             parameterNode.selectedGeometryId = str(self._geometryComboBox.itemData(0) or "")
         self.setParameterNode(parameterNode)
+        self._traceStep123State("initializeParameterNode", force=True)
 
     def _preloadNamedSceneInputs(self, parameterNode: SurgicalVision3D_PlannerParameterNode) -> None:
         if not self.logic:
             return
+
+        if parameterNode.criticalStructuresSegmentation and self.logic.isReferenceProbeTemplateSegmentation(
+            parameterNode.criticalStructuresSegmentation
+        ):
+            parameterNode.criticalStructuresSegmentation = None
+        if parameterNode.riskStructuresSegmentation and self.logic.isReferenceProbeTemplateSegmentation(
+            parameterNode.riskStructuresSegmentation
+        ):
+            parameterNode.riskStructuresSegmentation = None
 
         if not parameterNode.tumorSegmentation:
             tumorSegmentation = self.logic.findFirstNodeByClassAndPreferredNames(
@@ -1481,6 +2277,8 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             else:
                 for segmentationNode in slicer.util.getNodesByClass("vtkMRMLSegmentationNode"):
                     if parameterNode.tumorSegmentation and segmentationNode.GetID() == parameterNode.tumorSegmentation.GetID():
+                        continue
+                    if self.logic.isReferenceProbeTemplateSegmentation(segmentationNode):
                         continue
                     parameterNode.criticalStructuresSegmentation = segmentationNode
                     break
@@ -1504,37 +2302,90 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         elif self.logic.isGenericDefaultFiducialsNodeName(parameterNode.endpointsMarkups.GetName()):
             parameterNode.endpointsMarkups.SetName(slicer.mrmlScene.GenerateUniqueName("endpoints"))
 
+        if parameterNode.nativeFiducials and not slicer.mrmlScene.IsNodePresent(parameterNode.nativeFiducials):
+            parameterNode.nativeFiducials = None
+        if parameterNode.registeredFiducials and not slicer.mrmlScene.IsNodePresent(parameterNode.registeredFiducials):
+            parameterNode.registeredFiducials = None
+
+        endpointsNodeID = parameterNode.endpointsMarkups.GetID() if parameterNode.endpointsMarkups else ""
         nativeFiducials = self.logic.findFirstNodeByClassAndPreferredNames(
             "vtkMRMLMarkupsFiducialNode",
             DEFAULT_NATIVE_FIDUCIAL_NAMES,
         )
+        nativeNeedsReplacement = (
+            not parameterNode.nativeFiducials
+            or self.logic.isGenericDefaultFiducialsNodeName(parameterNode.nativeFiducials.GetName())
+            or (endpointsNodeID and parameterNode.nativeFiducials.GetID() == endpointsNodeID)
+        )
         if nativeFiducials and (
             not parameterNode.nativeFiducials
             or self.logic.isGenericDefaultFiducialsNodeName(parameterNode.nativeFiducials.GetName())
-        ):
+            or (endpointsNodeID and parameterNode.nativeFiducials.GetID() == endpointsNodeID)
+        ) and nativeFiducials.GetID() != endpointsNodeID:
             parameterNode.nativeFiducials = nativeFiducials
+        if nativeNeedsReplacement and (
+            not parameterNode.nativeFiducials
+            or (endpointsNodeID and parameterNode.nativeFiducials.GetID() == endpointsNodeID)
+        ):
+            parameterNode.nativeFiducials = slicer.mrmlScene.AddNewNodeByClass(
+                "vtkMRMLMarkupsFiducialNode",
+                slicer.mrmlScene.GenerateUniqueName("NativeFiducials"),
+            )
+        elif parameterNode.nativeFiducials and self.logic.isGenericDefaultFiducialsNodeName(parameterNode.nativeFiducials.GetName()):
+            parameterNode.nativeFiducials.SetName(slicer.mrmlScene.GenerateUniqueName("NativeFiducials"))
 
+        nativeNodeID = parameterNode.nativeFiducials.GetID() if parameterNode.nativeFiducials else ""
         registeredFiducials = self.logic.findFirstNodeByClassAndPreferredNames(
             "vtkMRMLMarkupsFiducialNode",
             DEFAULT_REGISTERED_FIDUCIAL_NAMES,
         )
+        registeredNeedsReplacement = (
+            not parameterNode.registeredFiducials
+            or self.logic.isGenericDefaultFiducialsNodeName(parameterNode.registeredFiducials.GetName())
+            or (endpointsNodeID and parameterNode.registeredFiducials.GetID() == endpointsNodeID)
+            or (nativeNodeID and parameterNode.registeredFiducials.GetID() == nativeNodeID)
+        )
         if registeredFiducials and (
             not parameterNode.registeredFiducials
             or self.logic.isGenericDefaultFiducialsNodeName(parameterNode.registeredFiducials.GetName())
-        ):
+            or (endpointsNodeID and parameterNode.registeredFiducials.GetID() == endpointsNodeID)
+            or (nativeNodeID and parameterNode.registeredFiducials.GetID() == nativeNodeID)
+        ) and registeredFiducials.GetID() not in {endpointsNodeID, nativeNodeID}:
             parameterNode.registeredFiducials = registeredFiducials
+        if registeredNeedsReplacement and (
+            not parameterNode.registeredFiducials
+            or parameterNode.registeredFiducials.GetID() in {endpointsNodeID, nativeNodeID}
+        ):
+            parameterNode.registeredFiducials = slicer.mrmlScene.AddNewNodeByClass(
+                "vtkMRMLMarkupsFiducialNode",
+                slicer.mrmlScene.GenerateUniqueName("RegisteredFiducials"),
+            )
+        elif parameterNode.registeredFiducials and self.logic.isGenericDefaultFiducialsNodeName(parameterNode.registeredFiducials.GetName()):
+            parameterNode.registeredFiducials.SetName(slicer.mrmlScene.GenerateUniqueName("RegisteredFiducials"))
 
     def setParameterNode(self, inputParameterNode: SurgicalVision3D_PlannerParameterNode | None) -> None:
+        if self._parameterNode is inputParameterNode and self._parameterNodeGuiTag is not None:
+            self._syncExportWidgetsFromParameterNode()
+            self._syncCohortWidgetsFromParameterNode()
+            self._syncReproducibilityWidgetsFromParameterNode()
+            self._syncBeginnerWidgetsFromParameterNode()
+            self._updateButtonStates()
+            return
+
         if self._parameterNode:
             if self._parameterNodeGuiTag is not None:
                 self._parameterNode.disconnectGui(self._parameterNodeGuiTag)
             self.removeObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._updateButtonStates)
+        self._parameterNodeGuiTag = None
+        self._setObservedEndpointsMarkupsNode(None)
 
         self._parameterNode = inputParameterNode
 
         if self._parameterNode:
             self._parameterNodeGuiTag = self._parameterNode.connectGui(self.ui)
             self.addObserver(self._parameterNode, vtk.vtkCommand.ModifiedEvent, self._updateButtonStates)
+            self._setObservedEndpointsMarkupsNode(self._parameterNode.endpointsMarkups)
+            self._autoSeedRegistrationFiducialsFromEndpoints()
             self._syncExportWidgetsFromParameterNode()
             self._syncCohortWidgetsFromParameterNode()
             self._syncReproducibilityWidgetsFromParameterNode()
@@ -1595,10 +2446,15 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self._parameterNode.generatedProbeNodeIDs = serializedProbeNodeIDs
         if serializedLineNodeIDs != self._parameterNode.generatedTrajectoryLineIDs:
             self._parameterNode.generatedTrajectoryLineIDs = serializedLineNodeIDs
-        if self._parameterNode.criticalStructuresSegmentation and self._parameterNode.riskStructuresSegmentation is not self._parameterNode.criticalStructuresSegmentation:
-            self._parameterNode.riskStructuresSegmentation = self._parameterNode.criticalStructuresSegmentation
-        elif self._parameterNode.riskStructuresSegmentation and not self._parameterNode.criticalStructuresSegmentation:
+        if str(self._parameterNode.trajectoryPlanningMode or "") not in ("Single", "MultiTrajectoryArray"):
+            self._parameterNode.trajectoryPlanningMode = "Single"
+        self._parameterNode.derivedTrajectoryCount = max(1, int(self._parameterNode.derivedTrajectoryCount))
+        self._parameterNode.derivedTrajectoryRadiusMm = max(0.0, float(self._parameterNode.derivedTrajectoryRadiusMm))
+        self._parameterNode.derivedTrajectoryAngleOffsetDeg = float(self._parameterNode.derivedTrajectoryAngleOffsetDeg)
+        if self._parameterNode.riskStructuresSegmentation and not self._parameterNode.criticalStructuresSegmentation:
             self._parameterNode.criticalStructuresSegmentation = self._parameterNode.riskStructuresSegmentation
+        elif self._parameterNode.criticalStructuresSegmentation and not self._parameterNode.riskStructuresSegmentation:
+            self._parameterNode.riskStructuresSegmentation = self._parameterNode.criticalStructuresSegmentation
 
         for nodeFieldName in (
             "criticalStructuresSegmentation",
@@ -1609,6 +2465,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             "coaxialNavigationTarget",
             "riskStructuresSegmentation",
             "trajectorySummaryTable",
+            "derivedTrajectorySummaryTable",
             "planSummaryTable",
             "marginThresholdSummaryTable",
             "structureSafetySummaryTable",
@@ -1629,9 +2486,26 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             "masterTrajectoryValidationTable",
             "masterPlanSnapshotTable",
             "coaxialPlanTable",
+            "derivedTrajectoryPreviewNode",
         ):
             node = getattr(self._parameterNode, nodeFieldName)
             if node and not slicer.mrmlScene.IsNodePresent(node):
+                setattr(self._parameterNode, nodeFieldName, None)
+
+        expectedNodeClassesByFieldName: dict[str, str] = {
+            "referenceProbeSegmentation": "vtkMRMLSegmentationNode",
+            "tumorSegmentation": "vtkMRMLSegmentationNode",
+            "criticalStructuresSegmentation": "vtkMRMLSegmentationNode",
+            "riskStructuresSegmentation": "vtkMRMLSegmentationNode",
+            "endpointsMarkups": "vtkMRMLMarkupsFiducialNode",
+            "nativeFiducials": "vtkMRMLMarkupsFiducialNode",
+            "registeredFiducials": "vtkMRMLMarkupsFiducialNode",
+            "tumorTransform": "vtkMRMLTransformNode",
+            "derivedTrajectoryPreviewNode": "vtkMRMLMarkupsLineNode",
+        }
+        for nodeFieldName, expectedClassName in expectedNodeClassesByFieldName.items():
+            node = getattr(self._parameterNode, nodeFieldName)
+            if node and (not hasattr(node, "IsA") or not node.IsA(expectedClassName)):
                 setattr(self._parameterNode, nodeFieldName, None)
 
     def _clearOwnedSafetyOutputs(self, clearReferences: bool = False) -> None:
@@ -1720,15 +2594,21 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         if clearReferences and hasattr(self.ui, "cohortStatusLabel"):
             self.ui.cohortStatusLabel.text = "Cohort evaluation not run."
 
-    def _clearOwnedBeginnerOutputs(self, clearReferences: bool = False, unlockPlan: bool = False) -> None:
+    def _clearOwnedBeginnerOutputs(
+        self,
+        clearReferences: bool = False,
+        unlockPlan: bool = False,
+        clearTrajectoryValidation: bool = True,
+    ) -> None:
         if not self.logic or not self._parameterNode:
             return
 
-        if self.logic.removeNodeIfOwned(
-            self._parameterNode.masterTrajectoryValidationTable,
-            GENERATED_MASTER_TRAJECTORY_VALIDATION_TABLE_ATTRIBUTE,
-        ) or clearReferences:
-            self._parameterNode.masterTrajectoryValidationTable = None
+        if clearTrajectoryValidation:
+            if self.logic.removeNodeIfOwned(
+                self._parameterNode.masterTrajectoryValidationTable,
+                GENERATED_MASTER_TRAJECTORY_VALIDATION_TABLE_ATTRIBUTE,
+            ) or clearReferences:
+                self._parameterNode.masterTrajectoryValidationTable = None
         if self.logic.removeNodeIfOwned(
             self._parameterNode.masterPlanSnapshotTable,
             GENERATED_MASTER_PLAN_SNAPSHOT_TABLE_ATTRIBUTE,
@@ -1747,7 +2627,9 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         if self.logic:
             self.logic.removeNodesByAttribute("vtkMRMLMarkupsLineNode", GENERATED_COAXIAL_LINE_ATTRIBUTE)
 
-        self._parameterNode.trajectoryValidationSummaryJson = "{}"
+        if clearTrajectoryValidation:
+            self._parameterNode.trajectoryValidationSummaryJson = "{}"
+            self._parameterNode.endpointAutoAdjustSummaryJson = "{}"
         self._parameterNode.mamAssessmentSummaryJson = "{}"
         self._parameterNode.masterPlanSnapshotJson = "{}"
         self._parameterNode.coaxialPlanSummaryJson = "{}"
@@ -1756,14 +2638,14 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self._setMasterTrajectoryLocked(False)
 
         if clearReferences:
-            if self._trajectoryValidationStatusLabel:
-                self._trajectoryValidationStatusLabel.text = "Trajectory not validated."
+            if clearTrajectoryValidation and self._trajectoryValidationStatusLabel:
+                self._setStatusLabelText(self._trajectoryValidationStatusLabel, "Trajectory not validated.")
             if self._marginAssessmentStatusLabel:
-                self._marginAssessmentStatusLabel.text = "MAM assessment not run."
+                self._setStatusLabelText(self._marginAssessmentStatusLabel, "MAM assessment not run.")
             if self._coaxialStatusLabel:
-                self._coaxialStatusLabel.text = "Coaxial plan not computed."
+                self._setStatusLabelText(self._coaxialStatusLabel, "Coaxial plan not computed.")
 
-    def _clearOwnedDerivedOutputs(self, clearReferences: bool = False) -> None:
+    def _clearOwnedDerivedOutputs(self, clearReferences: bool = False, clearBeginnerOutputs: bool = True) -> None:
         if not self.logic or not self._parameterNode:
             return
 
@@ -1785,12 +2667,29 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             GENERATED_MARGIN_THRESHOLD_TABLE_ATTRIBUTE,
         ) or clearReferences:
             self._parameterNode.marginThresholdSummaryTable = None
+        if self.logic.removeNodeIfOwned(
+            self._parameterNode.derivedTrajectorySummaryTable,
+            GENERATED_DERIVED_TRAJECTORY_SUMMARY_TABLE_ATTRIBUTE,
+        ) or clearReferences:
+            self._parameterNode.derivedTrajectorySummaryTable = None
+        if self.logic.removeNodeIfOwned(
+            self._parameterNode.derivedTrajectoryPreviewNode,
+            GENERATED_TRAJECTORY_LINE_ATTRIBUTE,
+        ) or clearReferences:
+            self._parameterNode.derivedTrajectoryPreviewNode = None
+        self._parameterNode.derivedTrajectoryBundleSummaryJson = "{}"
         self._clearOwnedSafetyOutputs(clearReferences=clearReferences)
         self._clearOwnedCoordinationOutputs(clearReferences=clearReferences)
         self._clearOwnedCohortOutputs(clearReferences=clearReferences)
-        self._clearOwnedBeginnerOutputs(clearReferences=clearReferences)
+        if clearBeginnerOutputs:
+            self._clearOwnedBeginnerOutputs(clearReferences=clearReferences)
 
     def _updateButtonStates(self, caller=None, event=None) -> None:
+        if self._sceneImportInProgress or self._sceneIsBusy():
+            self._traceStep123State("_updateButtonStates(scene busy)", force=False)
+            self._updateGitDashboardButtonStates()
+            return
+
         if not self._parameterNode:
             if hasattr(self.ui, "loadSampleCaseButton"):
                 self.ui.loadSampleCaseButton.enabled = bool(self._selectedSampleCaseScenePath())
@@ -1814,13 +2713,23 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 self._browseCaseFolderButton,
                 self._importCaseFolderButton,
                 self._openSegmentEditorButton,
+                self._planningModeComboBox,
+                self._derivedTrajectoryCountSpinBox,
+                self._derivedTrajectoryRadiusSpinBox,
+                self._derivedTrajectoryAngleOffsetSpinBox,
+                self._includeMasterTrajectoryCheckBox,
+                self._previewDerivedArrayButton,
+                self._clearDerivedArrayButton,
                 self._validateTrajectoryButton,
+                self._autoAdjustEndpointButton,
                 self._lockMasterPlanButton,
                 self._resetMasterPlanButton,
+                self._coaxialSpareSpinBox,
                 self._computeCoaxialPlanButton,
             ):
                 if widget:
                     widget.enabled = False
+            self._traceStep123State("_updateButtonStates(no parameter node)", force=False)
             self._updateGitDashboardButtonStates()
             return
 
@@ -1829,12 +2738,23 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
 
         hasProbeAndEndpoints = bool(self._parameterNode.referenceProbeSegmentation and self._parameterNode.endpointsMarkups)
         generatedProbeNodeIDs = self.logic.deserializeNodeIDs(self._parameterNode.generatedProbeNodeIDs) if self.logic else []
+        generatedTrajectoryLineIDs = self.logic.deserializeNodeIDs(self._parameterNode.generatedTrajectoryLineIDs) if self.logic else []
         hasGeneratedProbes = len(generatedProbeNodeIDs) > 0
         hasSingleGeneratedProbe = len(generatedProbeNodeIDs) == 1
+        hasGeneratedTrajectoryLines = len(generatedTrajectoryLineIDs) > 0
         hasCombinedProbe = self._parameterNode.combinedProbeSegmentation is not None
         hasTumor = self._parameterNode.tumorSegmentation is not None
         hasCriticalStructures = self._parameterNode.criticalStructuresSegmentation is not None
-        hasRegistrationInputs = bool(self._parameterNode.tumorSegmentation and self._parameterNode.nativeFiducials and self._parameterNode.registeredFiducials)
+        nativeFiducialCount = self._markupsPointCount(self._parameterNode.nativeFiducials)
+        registeredFiducialCount = self._markupsPointCount(self._parameterNode.registeredFiducials)
+        hasRegistrationInputs = bool(
+            self._parameterNode.tumorSegmentation
+            and self._parameterNode.nativeFiducials
+            and self._parameterNode.registeredFiducials
+            and nativeFiducialCount >= 3
+            and registeredFiducialCount >= 3
+            and nativeFiducialCount == registeredFiducialCount
+        )
         hasMarginModel = self._parameterNode.outputMarginModel is not None
         hasTumorTransform = bool(self._parameterNode.tumorSegmentation and self._parameterNode.tumorSegmentation.GetTransformNodeID())
         endpointControlPointCount = int(self._parameterNode.endpointsMarkups.GetNumberOfControlPoints()) if self._parameterNode.endpointsMarkups else 0
@@ -1843,18 +2763,91 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         isLocked = bool(self._parameterNode.masterTrajectoryLocked)
         trajectoryValidationSummary = self._jsonSummary(self._parameterNode.trajectoryValidationSummaryJson)
         mamAssessmentSummary = self._jsonSummary(self._parameterNode.mamAssessmentSummaryJson)
+        masterPlanSnapshotSummary = self._jsonSummary(self._parameterNode.masterPlanSnapshotJson)
+        coaxialPlanSummary = self._jsonSummary(self._parameterNode.coaxialPlanSummaryJson)
+        derivedBundleSummary = self._jsonSummary(self._parameterNode.derivedTrajectoryBundleSummaryJson)
         trajectoryValidationPass = bool(trajectoryValidationSummary.get("TrajectoryPass", False))
+        trajectoryValidationHasRun = bool(
+            ("TrajectoryPass" in trajectoryValidationSummary)
+            or self._parameterNode.masterTrajectoryValidationTable
+        )
+        trajectoryValidationFailed = bool(trajectoryValidationHasRun and not trajectoryValidationPass)
         mamValidationPass = bool(mamAssessmentSummary.get("MamPass", False))
+        hasMasterPlanSnapshot = bool(masterPlanSnapshotSummary)
+        isMultiTrajectoryArrayMode = self._isMultiTrajectoryArrayMode()
 
-        self.ui.placeProbesButton.enabled = hasProbeAndEndpoints and hasSingleMasterTrajectory and not isLocked
-        self.ui.createTrajectoryLinesButton.enabled = hasSingleMasterTrajectory and not isLocked
-        self.ui.mergeTranslatedProbesButton.enabled = hasGeneratedProbes and (hasSingleGeneratedProbe or not BEGINNER_WORKFLOW_MODE) and not isLocked
+        if BEGINNER_WORKFLOW_MODE:
+            singlePlacementReady = hasProbeAndEndpoints and hasSingleMasterTrajectory and not isLocked
+            multiPlacementReady = (
+                hasProbeAndEndpoints
+                and hasSingleMasterTrajectory
+                and trajectoryValidationPass
+                and not isLocked
+            )
+            self.ui.placeProbesButton.enabled = multiPlacementReady if isMultiTrajectoryArrayMode else singlePlacementReady
+            self.ui.createTrajectoryLinesButton.enabled = (
+                hasSingleMasterTrajectory
+                and not isLocked
+                and (trajectoryValidationPass if isMultiTrajectoryArrayMode else True)
+            )
+            allowMultipleGeneratedProbes = bool(isMultiTrajectoryArrayMode)
+        else:
+            self.ui.placeProbesButton.enabled = hasProbeAndEndpoints and hasEvenEndpointPairs and not isLocked
+            self.ui.createTrajectoryLinesButton.enabled = hasEvenEndpointPairs and not isLocked
+            allowMultipleGeneratedProbes = True
+
+        self.ui.mergeTranslatedProbesButton.enabled = (
+            hasGeneratedProbes
+            and (hasSingleGeneratedProbe or allowMultipleGeneratedProbes or not BEGINNER_WORKFLOW_MODE)
+            and not isLocked
+        )
         self.ui.registerTumorButton.enabled = hasRegistrationInputs
         self.ui.hardenTumorTransformButton.enabled = hasTumorTransform
+        if self._segmentEditorStatusLabel:
+            registrationBlockers: list[str] = []
+            if not self._parameterNode.tumorSegmentation:
+                registrationBlockers.append("select a tumor segmentation")
+            if not self._parameterNode.nativeFiducials:
+                registrationBlockers.append("select a native fiducials node")
+            if not self._parameterNode.registeredFiducials:
+                registrationBlockers.append("select a registered fiducials node")
+            if self._parameterNode.nativeFiducials and self._parameterNode.registeredFiducials:
+                if nativeFiducialCount != registeredFiducialCount:
+                    registrationBlockers.append(
+                        f"native/registered point counts must match (native={nativeFiducialCount}, registered={registeredFiducialCount})"
+                    )
+                if nativeFiducialCount < 3 or registeredFiducialCount < 3:
+                    registrationBlockers.append(
+                        f"at least 3 fiducials are required in each list (native={nativeFiducialCount}, registered={registeredFiducialCount})"
+                    )
+            if hasTumorTransform:
+                self._setStatusLabelText(
+                    self._segmentEditorStatusLabel,
+                    "Registration applied. Click Harden Registration to bake the transform into the tumor segmentation.",
+                )
+            elif hasRegistrationInputs:
+                self._setStatusLabelText(self._segmentEditorStatusLabel, "Ready: click Apply Fiducial Registration.")
+            elif registrationBlockers:
+                self._setStatusLabelText(
+                    self._segmentEditorStatusLabel,
+                    "Blocked: " + "; ".join(registrationBlockers) + ".",
+                )
+            else:
+                self._setStatusLabelText(
+                    self._segmentEditorStatusLabel,
+                    "Segment the tumor and critical structures in Segment Editor, then return to this module.",
+                )
         self.ui.evaluateMarginsButton.enabled = hasTumor and hasSingleMasterTrajectory and (hasCombinedProbe or hasGeneratedProbes) and not isLocked
         self.ui.recolorMarginsButton.enabled = hasMarginModel
         self.ui.resetMarginColorsButton.enabled = hasMarginModel
-        self.ui.evaluateProbeCoordinationButton.enabled = hasEvenEndpointPairs
+        if BEGINNER_WORKFLOW_MODE:
+            self.ui.evaluateProbeCoordinationButton.enabled = (
+                hasSingleMasterTrajectory
+                and not isLocked
+                and (trajectoryValidationPass if isMultiTrajectoryArrayMode else True)
+            )
+        else:
+            self.ui.evaluateProbeCoordinationButton.enabled = hasEvenEndpointPairs and not isLocked
         exportModeText = str(self.ui.exportModeComboBox.currentText) if hasattr(self.ui, "exportModeComboBox") else str(self._parameterNode.exportMode)
         scenarioRequired = exportModeText == "SelectedScenario"
         selectedScenarioID = (
@@ -1891,18 +2884,113 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self._openSegmentEditorButton.enabled = True
         if self._geometryComboBox:
             self._geometryComboBox.enabled = not isLocked
+        if self._planningModeComboBox:
+            self._planningModeComboBox.enabled = not isLocked
+        if self._derivedTrajectoryCountSpinBox:
+            self._derivedTrajectoryCountSpinBox.enabled = (not isLocked) and isMultiTrajectoryArrayMode
+        if self._derivedTrajectoryRadiusSpinBox:
+            self._derivedTrajectoryRadiusSpinBox.enabled = (not isLocked) and isMultiTrajectoryArrayMode
+        if self._derivedTrajectoryAngleOffsetSpinBox:
+            self._derivedTrajectoryAngleOffsetSpinBox.enabled = (not isLocked) and isMultiTrajectoryArrayMode
+        if self._includeMasterTrajectoryCheckBox:
+            self._includeMasterTrajectoryCheckBox.enabled = (not isLocked) and isMultiTrajectoryArrayMode
+        if self._previewDerivedArrayButton:
+            self._previewDerivedArrayButton.enabled = (
+                isMultiTrajectoryArrayMode
+                and hasSingleMasterTrajectory
+                and trajectoryValidationPass
+                and not isLocked
+            )
+        if self._clearDerivedArrayButton:
+            self._clearDerivedArrayButton.enabled = (
+                not isLocked
+                and (
+                    hasGeneratedTrajectoryLines
+                    or bool(derivedBundleSummary)
+                    or bool(self._parameterNode.derivedTrajectorySummaryTable)
+                )
+            )
         if self._mamSpinBox:
             self._mamSpinBox.enabled = not isLocked
+        if self._placeMultipleControlPointsCheckBox:
+            self._placeMultipleControlPointsCheckBox.enabled = not isLocked
+        if self._endpointsPlaceWidget:
+            self._endpointsPlaceWidget.enabled = not isLocked
         if hasattr(self.ui, "endpointsMarkupsSelector"):
             self.ui.endpointsMarkupsSelector.enabled = not isLocked
         if self._validateTrajectoryButton:
             self._validateTrajectoryButton.enabled = hasSingleMasterTrajectory and hasCriticalStructures and not isLocked
+        if self._autoAdjustEndpointButton:
+            self._autoAdjustEndpointButton.enabled = (
+                hasSingleMasterTrajectory
+                and hasTumor
+                and hasCriticalStructures
+                and not isLocked
+                and trajectoryValidationFailed
+            )
+        if hasattr(self.ui, "placeProbesButton") and BEGINNER_WORKFLOW_MODE:
+            self.ui.placeProbesButton.text = "Place Trajectory Bundle" if isMultiTrajectoryArrayMode else "Place Single Applicator"
+        if hasattr(self.ui, "createTrajectoryLinesButton") and BEGINNER_WORKFLOW_MODE:
+            self.ui.createTrajectoryLinesButton.text = (
+                "Preview Planned Trajectories"
+                if isMultiTrajectoryArrayMode
+                else "Preview Master Trajectory"
+            )
         if self._lockMasterPlanButton:
             self._lockMasterPlanButton.enabled = (trajectoryValidationPass and mamValidationPass and not isLocked)
         if self._resetMasterPlanButton:
             self._resetMasterPlanButton.enabled = isLocked
+        if self._coaxialSpareSpinBox:
+            self._coaxialSpareSpinBox.enabled = True
         if self._computeCoaxialPlanButton:
-            self._computeCoaxialPlanButton.enabled = isLocked and bool(str(self._parameterNode.masterPlanSnapshotJson or "{}").strip())
+            self._computeCoaxialPlanButton.enabled = isLocked and hasMasterPlanSnapshot
+        if self._coaxialStatusLabel:
+            step6StatusText = "Coaxial plan not computed."
+            if isLocked:
+                coaxialNotes = str(coaxialPlanSummary.get("notes", "")).strip()
+                if coaxialNotes:
+                    step6StatusText = coaxialNotes
+                elif hasMasterPlanSnapshot:
+                    step6StatusText = "Ready: click Compute Coaxial Plan."
+                else:
+                    step6StatusText = "Blocked: lock is stale because the master plan snapshot is missing. Reset and lock again."
+            else:
+                blockedReasons: list[str] = []
+                if not trajectoryValidationPass:
+                    trajectoryStatusText = str(
+                        trajectoryValidationSummary.get("StatusText", "Trajectory not validated.")
+                    ).strip()
+                    blockedReasons.append(f"Step 4 trajectory validation not passed ({trajectoryStatusText})")
+                if not mamValidationPass:
+                    mamStatusText = str(
+                        mamAssessmentSummary.get("StatusText", "MAM assessment not run.")
+                    ).strip()
+                    blockedReasons.append(f"Step 5 MAM validation not passed ({mamStatusText})")
+                if blockedReasons:
+                    step6StatusText = "Blocked: " + "; ".join(blockedReasons) + "."
+                else:
+                    step6StatusText = "Ready: click Lock Validated Master Plan."
+            self._setStatusLabelText(self._coaxialStatusLabel, step6StatusText)
+        if self._derivedArrayStatusLabel:
+            if not isMultiTrajectoryArrayMode:
+                self._setStatusLabelText(self._derivedArrayStatusLabel, "Array disabled: planning mode is Single.")
+            elif isLocked:
+                self._setStatusLabelText(self._derivedArrayStatusLabel, "Blocked: reset lock before editing trajectory array.")
+            elif not hasSingleMasterTrajectory:
+                self._setStatusLabelText(self._derivedArrayStatusLabel, "Blocked: define exactly one master trajectory first.")
+            elif not trajectoryValidationPass:
+                self._setStatusLabelText(self._derivedArrayStatusLabel, "Blocked: validate master trajectory first.")
+            elif bool(derivedBundleSummary):
+                totalCount = int(derivedBundleSummary.get("totalTrajectoryCount", derivedBundleSummary.get("TotalTrajectoryCount", 0)))
+                if totalCount <= 0:
+                    totalCount = int(derivedBundleSummary.get("TrajectoryCount", 0))
+                self._setStatusLabelText(
+                    self._derivedArrayStatusLabel,
+                    f"Preview generated: {max(totalCount, 0)} total trajectories.",
+                )
+            else:
+                self._setStatusLabelText(self._derivedArrayStatusLabel, "Ready: preview derived array.")
+        self._traceStep123State("_updateButtonStates", force=False)
         self._updateGitDashboardButtonStates()
 
     def _updateGitDashboardButtonStates(self) -> None:
@@ -1947,7 +3035,203 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
     def _singleMasterTrajectory(self) -> ProbeTrajectory:
         if not self.logic or not self._parameterNode or not self._parameterNode.endpointsMarkups:
             raise RuntimeError("Master trajectory markups are not available.")
-        return self.logic.extractSingleTrajectoryFromMarkups(self._parameterNode.endpointsMarkups)
+        trajectory = self.logic.extractSingleTrajectoryFromMarkups(self._parameterNode.endpointsMarkups)
+        trajectory.role = "Master"
+        trajectory.label = "Master"
+        trajectory.angleDeg = None
+        trajectory.radialOffsetMm = 0.0
+        trajectory.derivedFromMaster = False
+        return trajectory
+
+    def _isMultiTrajectoryArrayMode(self) -> bool:
+        if not self._parameterNode:
+            return False
+        return str(self._parameterNode.trajectoryPlanningMode or "Single") == "MultiTrajectoryArray"
+
+    def _currentDerivedTrajectoryArrayConfig(self) -> DerivedTrajectoryArrayConfig:
+        if not self._parameterNode:
+            return DerivedTrajectoryArrayConfig()
+        return DerivedTrajectoryArrayConfig(
+            planningMode=str(self._parameterNode.trajectoryPlanningMode or "Single"),
+            derivedTrajectoryCount=max(1, int(self._parameterNode.derivedTrajectoryCount)),
+            radiusMm=max(0.0, float(self._parameterNode.derivedTrajectoryRadiusMm)),
+            angleOffsetDeg=float(self._parameterNode.derivedTrajectoryAngleOffsetDeg),
+            includeMasterTrajectory=bool(self._parameterNode.includeMasterTrajectoryInArray),
+        )
+
+    def _plannedTrajectoryBundle(self, requireValidatedMasterForArray: bool = True) -> list[ProbeTrajectory]:
+        if not self.logic or not self._parameterNode or not self._parameterNode.endpointsMarkups:
+            raise RuntimeError("Master trajectory markups are not available.")
+
+        arrayConfig = self._currentDerivedTrajectoryArrayConfig()
+        isMultiMode = arrayConfig.planningMode == "MultiTrajectoryArray"
+        if not BEGINNER_WORKFLOW_MODE and not isMultiMode:
+            return self.logic.extractTrajectoriesFromMarkups(self._parameterNode.endpointsMarkups, strictEven=True)
+
+        masterTrajectory = self._singleMasterTrajectory()
+        if not isMultiMode:
+            return [masterTrajectory]
+
+        if requireValidatedMasterForArray:
+            validationSummary = self._jsonSummary(self._parameterNode.trajectoryValidationSummaryJson)
+            if not bool(validationSummary.get("TrajectoryPass", False)):
+                raise ValueError("Validate the master trajectory before generating a multi-trajectory array.")
+
+        return self.logic.generateDerivedParallelTrajectories(
+            masterTrajectory,
+            derivedCount=int(arrayConfig.derivedTrajectoryCount),
+            radiusMm=float(arrayConfig.radiusMm),
+            angleOffsetDeg=float(arrayConfig.angleOffsetDeg),
+            includeMaster=bool(arrayConfig.includeMasterTrajectory),
+        )
+
+    def _invalidateGeneratedPlanningOutputs(self, reasonText: str = "", invalidateMasterValidation: bool = False) -> None:
+        if not self.logic or not self._parameterNode:
+            return
+        hasGeneratedNodes = bool(
+            self.logic.deserializeNodeIDs(self._parameterNode.generatedProbeNodeIDs)
+            or self.logic.deserializeNodeIDs(self._parameterNode.generatedTrajectoryLineIDs)
+        )
+        hasDerivedSummary = bool(self._jsonSummary(self._parameterNode.derivedTrajectoryBundleSummaryJson))
+        if (
+            not hasGeneratedNodes
+            and not hasDerivedSummary
+            and not self._parameterNode.trajectorySummaryTable
+            and not self._parameterNode.derivedTrajectorySummaryTable
+            and not self._parameterNode.combinedProbeSegmentation
+            and not self._parameterNode.planSummaryTable
+            and not self._parameterNode.marginThresholdSummaryTable
+        ):
+            return
+
+        self.logic.removeGeneratedProbeNodes()
+        self.logic.removeGeneratedTrajectoryLines()
+        self._parameterNode.generatedProbeNodeIDs = "[]"
+        self._parameterNode.generatedTrajectoryLineIDs = "[]"
+        self._clearOwnedDerivedOutputs(clearReferences=True, clearBeginnerOutputs=False)
+        self._parameterNode.derivedTrajectoryPreviewNode = None
+        self._parameterNode.derivedTrajectoryBundleSummaryJson = "{}"
+        if invalidateMasterValidation:
+            self._clearOwnedBeginnerOutputs(clearReferences=True, unlockPlan=True)
+        if self._marginAssessmentStatusLabel and reasonText:
+            self._setStatusLabelText(self._marginAssessmentStatusLabel, f"Ready: {reasonText}")
+
+    @staticmethod
+    def _formatRasPoint(pointRAS: Sequence[float]) -> str:
+        return ",".join(f"{float(value):.3f}" for value in pointRAS)
+
+    def _buildDeferredDerivedBundleSummary(
+        self,
+        trajectories: Sequence[ProbeTrajectory],
+        statusText: str = "Bundle summary generated. Critical-structure evaluation is deferred.",
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        rows: list[dict[str, Any]] = [
+            {
+                "TrajectoryIndex": int(trajectory.trajectoryIndex + 1),
+                "Role": str(trajectory.role or ""),
+                "Source": "derived" if bool(trajectory.derivedFromMaster) else "master",
+                "AngleDeg": float(trajectory.angleDeg) if trajectory.angleDeg is not None else float("nan"),
+                "RadialOffsetMm": float(trajectory.radialOffsetMm),
+                "EntryPointRAS": self._formatRasPoint(trajectory.entryPointRAS),
+                "TargetPointRAS": self._formatRasPoint(trajectory.targetPointRAS),
+                "IntersectsCriticalStructures": False,
+                "MinDistanceToCriticalStructuresMm": float("nan"),
+                "CheckedStructureCount": 0,
+            }
+            for trajectory in trajectories
+        ]
+        summary: dict[str, Any] = {
+            "TrajectoryCount": int(len(trajectories)),
+            "IntersectingTrajectoryCount": 0,
+            "NonIntersectingTrajectoryCount": int(len(trajectories)),
+            "MinDistanceToCriticalStructuresMm": float("nan"),
+            "StatusText": str(statusText),
+            "CriticalStructuresAvailable": bool(self._parameterNode and self._parameterNode.criticalStructuresSegmentation),
+        }
+        return rows, summary
+
+    def _publishDerivedTrajectoryBundleSummary(
+        self,
+        trajectories: Sequence[ProbeTrajectory],
+        evaluateAgainstCriticalStructures: bool = True,
+    ) -> None:
+        if not self.logic or not self._parameterNode:
+            return
+
+        if not self._isMultiTrajectoryArrayMode():
+            if self.logic.removeNodeIfOwned(
+                self._parameterNode.derivedTrajectorySummaryTable,
+                GENERATED_DERIVED_TRAJECTORY_SUMMARY_TABLE_ATTRIBUTE,
+            ):
+                self._parameterNode.derivedTrajectorySummaryTable = None
+            else:
+                self._parameterNode.derivedTrajectorySummaryTable = None
+            self._parameterNode.derivedTrajectoryBundleSummaryJson = "{}"
+            return
+
+        if evaluateAgainstCriticalStructures:
+            try:
+                rows, validationSummary = self.logic.evaluateDerivedTrajectoryBundleAgainstCriticalStructures(
+                    trajectories,
+                    self._parameterNode.criticalStructuresSegmentation,
+                    self._parameterNode.tumorSegmentation,
+                )
+            except Exception as exc:
+                logging.exception("Derived bundle critical-structure evaluation failed; using deferred summary.")
+                rows, validationSummary = self._buildDeferredDerivedBundleSummary(
+                    trajectories,
+                    statusText=f"Bundle summary generated. Critical-structure evaluation failed: {str(exc)}",
+                )
+        else:
+            rows, validationSummary = self._buildDeferredDerivedBundleSummary(trajectories)
+        arrayConfig = self._currentDerivedTrajectoryArrayConfig()
+        summary = DerivedTrajectoryArraySummary(
+            planningMode=arrayConfig.planningMode,
+            masterIncluded=bool(arrayConfig.includeMasterTrajectory),
+            derivedTrajectoryCount=int(arrayConfig.derivedTrajectoryCount),
+            totalTrajectoryCount=int(len(trajectories)),
+            radiusMm=float(arrayConfig.radiusMm),
+            angleOffsetDeg=float(arrayConfig.angleOffsetDeg),
+            notes=str(validationSummary.get("StatusText", "")),
+        )
+        summaryValues = asdict(summary)
+        summaryValues.update(validationSummary)
+        self._parameterNode.derivedTrajectoryBundleSummaryJson = json.dumps(summaryValues, sort_keys=True)
+
+        summaryTable = self.logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            DERIVED_TRAJECTORY_SUMMARY_TABLE_NODE_NAME,
+            GENERATED_DERIVED_TRAJECTORY_SUMMARY_TABLE_ATTRIBUTE,
+            self._parameterNode.derivedTrajectorySummaryTable,
+        )
+        self.logic.populateDerivedTrajectoryBundleSummaryTable(summaryTable, rows)
+        self._parameterNode.derivedTrajectorySummaryTable = summaryTable
+
+    def _applyDefaultCtAbdomenDisplay(self) -> None:
+        if not self.logic:
+            return
+        primaryVolumeNode = self.logic.primaryScalarVolumeNode()
+        if not primaryVolumeNode:
+            return
+        if not self.logic.applyCtAbdomenDisplayToVolume(primaryVolumeNode):
+            return
+        if hasattr(slicer.util, "setSliceViewerLayers"):
+            try:
+                slicer.util.setSliceViewerLayers(background=primaryVolumeNode, fit=True)
+            except Exception:
+                pass
+
+    def _ensurePrimaryVolumeVisibleInSlices(self, fit: bool = False) -> None:
+        if not self.logic or not hasattr(slicer.util, "setSliceViewerLayers"):
+            return
+        primaryVolumeNode = self.logic.primaryScalarVolumeNode()
+        if not primaryVolumeNode:
+            return
+        self.logic.applyCtAbdomenDisplayToVolume(primaryVolumeNode)
+        try:
+            slicer.util.setSliceViewerLayers(background=primaryVolumeNode, fit=bool(fit))
+        except Exception:
+            pass
 
     def onCaseFolderPathChanged(self, _text=None) -> None:
         if self._parameterNode and self._caseFolderLineEdit:
@@ -1975,19 +3259,97 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             caseFolderPath = str(self._caseFolderLineEdit.text).strip() if self._caseFolderLineEdit else ""
             if not caseFolderPath:
                 raise ValueError("Select a case folder before importing.")
+            self._logStepTrace("Step1", f"Import case requested: {caseFolderPath}")
             self.logic.loadCaseFolder(caseFolderPath)
             self.initializeParameterNode()
+            self._applyDefaultCtAbdomenDisplay()
             if self._parameterNode:
                 self._parameterNode.caseFolderPath = caseFolderPath
+                self._parameterNode.generatedProbeNodeIDs = "[]"
+                self._parameterNode.generatedTrajectoryLineIDs = "[]"
+            self.logic.removeGeneratedProbeNodes()
+            self.logic.removeGeneratedTrajectoryLines()
+            self._clearOwnedDerivedOutputs(clearReferences=True, clearBeginnerOutputs=False)
             self._clearOwnedBeginnerOutputs(clearReferences=True, unlockPlan=True)
             if self._segmentEditorStatusLabel:
-                self._segmentEditorStatusLabel.text = "Case imported. Review or refine segments in Segment Editor if needed."
+                self._setStatusLabelText(
+                    self._segmentEditorStatusLabel,
+                    "Case imported. Review or refine segments in Segment Editor if needed.",
+                )
+            if self._parameterNode:
+                tumorName = self._parameterNode.tumorSegmentation.GetName() if self._parameterNode.tumorSegmentation else "(none)"
+                criticalName = (
+                    self._parameterNode.riskStructuresSegmentation.GetName()
+                    if self._parameterNode.riskStructuresSegmentation
+                    else "(none)"
+                )
+                self._logStepTrace("Step1", f"Import completed. Tumor='{tumorName}', Critical structures='{criticalName}'")
+            self._traceStep123State("onImportCaseFolderButton", force=True)
             self._updateButtonStates()
 
     def onOpenSegmentEditorButton(self) -> None:
+        if self.logic and self._parameterNode:
+            preparedNodeIDs: set[str] = set()
+            for segmentationNode in (
+                self._parameterNode.tumorSegmentation,
+                self._parameterNode.criticalStructuresSegmentation,
+                self._parameterNode.riskStructuresSegmentation,
+            ):
+                if not segmentationNode:
+                    continue
+                nodeID = segmentationNode.GetID()
+                if nodeID in preparedNodeIDs:
+                    continue
+                preparedNodeIDs.add(nodeID)
+                self.logic.prepareSegmentationForEditing(segmentationNode)
+            tumorName = self._parameterNode.tumorSegmentation.GetName() if self._parameterNode.tumorSegmentation else "(none)"
+            criticalName = (
+                self._parameterNode.riskStructuresSegmentation.GetName()
+                if self._parameterNode.riskStructuresSegmentation
+                else "(none)"
+            )
+            self._logStepTrace("Step2", f"Open Segment Editor. Tumor='{tumorName}', Critical structures='{criticalName}'")
         slicer.util.selectModule("SegmentEditor")
+        qt.QTimer.singleShot(0, self._configureSegmentEditorContextFromParameterNode)
         if self._segmentEditorStatusLabel:
-            self._segmentEditorStatusLabel.text = "Segment Editor opened. Return here after updating tumor and critical structures."
+            self._setStatusLabelText(
+                self._segmentEditorStatusLabel,
+                "Segment Editor opened. Registration stays blocked until tumor + native/registered fiducials "
+                "are selected with matching counts and at least 3 points each.",
+            )
+        self._traceStep123State("onOpenSegmentEditorButton", force=True)
+
+    def _configureSegmentEditorContextFromParameterNode(self) -> None:
+        if not self.logic or not self._parameterNode:
+            return
+        try:
+            segmentEditorWidget = slicer.util.getModuleWidget("SegmentEditor")
+        except Exception:
+            segmentEditorWidget = None
+        if not segmentEditorWidget:
+            return
+
+        editor = getattr(segmentEditorWidget, "editor", None)
+        if not editor:
+            return
+
+        preferredSegmentation = (
+            self._parameterNode.tumorSegmentation
+            or self._parameterNode.criticalStructuresSegmentation
+            or self._parameterNode.riskStructuresSegmentation
+        )
+        if preferredSegmentation and hasattr(editor, "setSegmentationNode"):
+            try:
+                editor.setSegmentationNode(preferredSegmentation)
+            except Exception:
+                pass
+
+        sourceVolume = self.logic.primaryScalarVolumeNode()
+        if sourceVolume and hasattr(editor, "setSourceVolumeNode"):
+            try:
+                editor.setSourceVolumeNode(sourceVolume)
+            except Exception:
+                pass
 
     def onSelectedGeometryChanged(self, _index=None) -> None:
         if not self.logic or not self._parameterNode or not self._geometryComboBox:
@@ -2005,8 +3367,70 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         self.logic.removeGeneratedTrajectoryLines()
         self._parameterNode.generatedProbeNodeIDs = "[]"
         self._parameterNode.generatedTrajectoryLineIDs = "[]"
-        self._clearOwnedDerivedOutputs(clearReferences=True)
-        self._clearOwnedBeginnerOutputs(clearReferences=True, unlockPlan=True)
+        self._clearOwnedDerivedOutputs(clearReferences=True, clearBeginnerOutputs=False)
+        self._clearOwnedBeginnerOutputs(clearReferences=True, unlockPlan=True, clearTrajectoryValidation=False)
+        self._updateButtonStates()
+
+    def onTrajectoryPlanningModeChanged(self, _index=None) -> None:
+        if not self._parameterNode or not self._planningModeComboBox:
+            return
+        selectedMode = str(self._planningModeComboBox.itemData(self._planningModeComboBox.currentIndex) or "Single")
+        if selectedMode not in ("Single", "MultiTrajectoryArray"):
+            selectedMode = "Single"
+        if selectedMode != str(self._parameterNode.trajectoryPlanningMode or "Single"):
+            self._parameterNode.trajectoryPlanningMode = selectedMode
+            self._invalidateGeneratedPlanningOutputs("trajectory planning mode changed. Re-preview and re-place probes.")
+        else:
+            self._parameterNode.trajectoryPlanningMode = selectedMode
+        self._logStepTrace("Step3", f"Trajectory planning mode set to '{selectedMode}'.")
+        self._updateButtonStates()
+
+    def onDerivedTrajectoryCountChanged(self, newValue: int) -> None:
+        if not self._parameterNode:
+            return
+        updatedCount = int(max(1, newValue))
+        if int(self._parameterNode.derivedTrajectoryCount) != updatedCount:
+            self._parameterNode.derivedTrajectoryCount = updatedCount
+            self._invalidateGeneratedPlanningOutputs("derived trajectory count changed. Re-preview and re-place probes.")
+        else:
+            self._parameterNode.derivedTrajectoryCount = updatedCount
+        self._logStepTrace("Step3", f"Derived trajectory count set to {updatedCount}.")
+        self._updateButtonStates()
+
+    def onDerivedTrajectoryRadiusChanged(self, newValue: float) -> None:
+        if not self._parameterNode:
+            return
+        updatedRadius = float(max(0.0, newValue))
+        if not math.isclose(float(self._parameterNode.derivedTrajectoryRadiusMm), updatedRadius, abs_tol=1e-6):
+            self._parameterNode.derivedTrajectoryRadiusMm = updatedRadius
+            self._invalidateGeneratedPlanningOutputs("derived trajectory radius changed. Re-preview and re-place probes.")
+        else:
+            self._parameterNode.derivedTrajectoryRadiusMm = updatedRadius
+        self._logStepTrace("Step3", f"Derived trajectory radius set to {updatedRadius:.1f} mm.")
+        self._updateButtonStates()
+
+    def onDerivedTrajectoryAngleOffsetChanged(self, newValue: float) -> None:
+        if not self._parameterNode:
+            return
+        updatedOffset = float(newValue)
+        if not math.isclose(float(self._parameterNode.derivedTrajectoryAngleOffsetDeg), updatedOffset, abs_tol=1e-6):
+            self._parameterNode.derivedTrajectoryAngleOffsetDeg = updatedOffset
+            self._invalidateGeneratedPlanningOutputs("derived angle offset changed. Re-preview and re-place probes.")
+        else:
+            self._parameterNode.derivedTrajectoryAngleOffsetDeg = updatedOffset
+        self._logStepTrace("Step3", f"Derived trajectory angle offset set to {updatedOffset:.1f} deg.")
+        self._updateButtonStates()
+
+    def onIncludeMasterTrajectoryInArrayToggled(self, checked: bool) -> None:
+        if not self._parameterNode:
+            return
+        includeMaster = bool(checked)
+        if bool(self._parameterNode.includeMasterTrajectoryInArray) != includeMaster:
+            self._parameterNode.includeMasterTrajectoryInArray = includeMaster
+            self._invalidateGeneratedPlanningOutputs("bundle composition changed. Re-preview and re-place probes.")
+        else:
+            self._parameterNode.includeMasterTrajectoryInArray = includeMaster
+        self._logStepTrace("Step3", f"Include master trajectory in array set to {includeMaster}.")
         self._updateButtonStates()
 
     def onMamValueChanged(self, newValue: float) -> None:
@@ -2016,36 +3440,192 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         if self._parameterNode.outputMarginModel:
             self._parameterNode.mamAssessmentSummaryJson = "{}"
             if self._marginAssessmentStatusLabel:
-                self._marginAssessmentStatusLabel.text = "MAM changed. Re-run MAM assessment to refresh colors and pass/fail."
+                self._setStatusLabelText(
+                    self._marginAssessmentStatusLabel,
+                    "MAM changed. Re-run MAM assessment to refresh colors and pass/fail.",
+                )
         self._updateButtonStates()
+
+    def onPlaceMultipleControlPointsToggled(self, checked: bool) -> None:
+        if self._parameterNode:
+            self._parameterNode.placeMultipleControlPoints = bool(checked)
+        self._setPlaceModePersistence(bool(checked))
+        self._setEndpointsPlaceWidgetMultiplePlacement(bool(checked))
+        self._updateButtonStates()
+
+    def _clearComputedCoaxialOutputs(self) -> None:
+        if not self.logic or not self._parameterNode:
+            return
+        if self.logic.removeNodeIfOwned(
+            self._parameterNode.coaxialPlanTable,
+            GENERATED_COAXIAL_PLAN_TABLE_ATTRIBUTE,
+        ):
+            self._parameterNode.coaxialPlanTable = None
+        if self.logic.removeNodeIfOwned(
+            self._parameterNode.coaxialNavigationTarget,
+            GENERATED_COAXIAL_TARGET_ATTRIBUTE,
+        ):
+            self._parameterNode.coaxialNavigationTarget = None
+        self.logic.removeNodesByAttribute("vtkMRMLMarkupsLineNode", GENERATED_COAXIAL_LINE_ATTRIBUTE)
+        self._parameterNode.coaxialPlanSummaryJson = "{}"
+
+    def _invalidateCoaxialPlanWithReadyStatus(self, reasonText: str) -> None:
+        if not self._parameterNode:
+            return
+        hadComputedPlan = bool(self._jsonSummary(self._parameterNode.coaxialPlanSummaryJson))
+        if not hadComputedPlan and not self._parameterNode.coaxialPlanTable and not self._parameterNode.coaxialNavigationTarget:
+            return
+        self._clearComputedCoaxialOutputs()
+        if self._coaxialStatusLabel:
+            self._setStatusLabelText(self._coaxialStatusLabel, f"Ready: {reasonText}")
 
     def onCoaxialTechniqueChanged(self, _index=None) -> None:
         if not self._parameterNode or not self._coaxialTechniqueComboBox:
             return
-        self._parameterNode.coaxialTechnique = str(self._coaxialTechniqueComboBox.currentText or "PullBack")
+        updatedTechnique = str(self._coaxialTechniqueComboBox.currentText or "PullBack")
+        if updatedTechnique != str(self._parameterNode.coaxialTechnique or "PullBack"):
+            self._parameterNode.coaxialTechnique = updatedTechnique
+            self._invalidateCoaxialPlanWithReadyStatus("technique changed. Click Compute Coaxial Plan.")
+        else:
+            self._parameterNode.coaxialTechnique = updatedTechnique
         self._updateButtonStates()
+
+    def onCoaxialSpareMmChanged(self, newValue: float) -> None:
+        if not self._parameterNode:
+            return
+        updatedSpareMm = float(max(0.0, newValue))
+        if not math.isclose(float(self._parameterNode.coaxialSpareMm), updatedSpareMm, abs_tol=1e-6):
+            self._parameterNode.coaxialSpareMm = updatedSpareMm
+            self._invalidateCoaxialPlanWithReadyStatus("spare changed. Click Compute Coaxial Plan.")
+        else:
+            self._parameterNode.coaxialSpareMm = updatedSpareMm
+        self._updateButtonStates()
+
+    def _runMasterTrajectoryValidation(
+        self,
+        trajectory: ProbeTrajectory | None = None,
+    ) -> tuple[list[dict[str, float | int | bool | str]], dict[str, float | int | bool | str]]:
+        if not self.logic or not self._parameterNode:
+            raise RuntimeError("Module logic is not initialized.")
+        evaluationTrajectory = trajectory if trajectory is not None else self._singleMasterTrajectory()
+        validationRows, validationSummary = self.logic.evaluateMasterTrajectoryAgainstCriticalStructures(
+            evaluationTrajectory,
+            self._parameterNode.criticalStructuresSegmentation,
+            self._parameterNode.tumorSegmentation,
+        )
+        validationTable = self.logic.createOrReuseOwnedOutputNode(
+            "vtkMRMLTableNode",
+            MASTER_TRAJECTORY_VALIDATION_TABLE_NODE_NAME,
+            GENERATED_MASTER_TRAJECTORY_VALIDATION_TABLE_ATTRIBUTE,
+            self._parameterNode.masterTrajectoryValidationTable,
+        )
+        self.logic.populateMasterTrajectoryValidationTable(validationTable, validationRows)
+        self._parameterNode.masterTrajectoryValidationTable = validationTable
+        self._parameterNode.trajectoryValidationSummaryJson = json.dumps(validationSummary, sort_keys=True)
+        if self._trajectoryValidationStatusLabel:
+            self._setStatusLabelText(
+                self._trajectoryValidationStatusLabel,
+                str(validationSummary.get("StatusText", "Trajectory validation completed.")),
+            )
+        return validationRows, validationSummary
 
     def onValidateTrajectoryButton(self) -> None:
         with slicer.util.tryWithErrorDisplay(_("Failed to validate the master trajectory."), waitCursor=True):
             if not self.logic or not self._parameterNode:
                 raise RuntimeError("Module logic is not initialized.")
+            self._parameterNode.endpointAutoAdjustSummaryJson = "{}"
+            self._logStepTrace("Step4", "Validating master trajectory against critical structures.")
+            _validationRows, validationSummary = self._runMasterTrajectoryValidation()
+            self._logStepTrace(
+                "Step4",
+                (
+                    f"Validation completed. Pass={bool(validationSummary.get('TrajectoryPass', False))}, "
+                    f"Intersected={int(validationSummary.get('IntersectedStructureCount', 0))}, "
+                    f"Checked={int(validationSummary.get('CheckedStructureCount', 0))}"
+                ),
+            )
+            self._updateButtonStates()
+
+    def onAutoAdjustEndpointButton(self) -> None:
+        with slicer.util.tryWithErrorDisplay(_("Failed to auto-adjust the endpoint."), waitCursor=True):
+            if not self.logic or not self._parameterNode:
+                raise RuntimeError("Module logic is not initialized.")
+            if not self._parameterNode.endpointsMarkups:
+                raise ValueError("Master trajectory markups are not available.")
+
+            self._logStepTrace(
+                "Step4",
+                (
+                    "Auto-adjust endpoint requested "
+                    f"(maxShift={AUTO_ADJUST_MAX_ENDPOINT_SHIFT_MM:.1f} mm, step={AUTO_ADJUST_ENDPOINT_SHIFT_STEP_MM:.1f} mm, "
+                    f"azimuth={AUTO_ADJUST_AZIMUTH_SAMPLE_COUNT})."
+                ),
+            )
             trajectory = self._singleMasterTrajectory()
-            validationRows, validationSummary = self.logic.evaluateMasterTrajectoryAgainstCriticalStructures(
+            adjustResult = self.logic.autoAdjustMasterTrajectoryEndpoint(
                 trajectory,
                 self._parameterNode.criticalStructuresSegmentation,
                 self._parameterNode.tumorSegmentation,
+                maxEndpointShiftMm=AUTO_ADJUST_MAX_ENDPOINT_SHIFT_MM,
+                shiftStepMm=AUTO_ADJUST_ENDPOINT_SHIFT_STEP_MM,
+                azimuthSampleCount=AUTO_ADJUST_AZIMUTH_SAMPLE_COUNT,
             )
-            validationTable = self.logic.createOrReuseOwnedOutputNode(
-                "vtkMRMLTableNode",
-                MASTER_TRAJECTORY_VALIDATION_TABLE_NODE_NAME,
-                GENERATED_MASTER_TRAJECTORY_VALIDATION_TABLE_ATTRIBUTE,
-                self._parameterNode.masterTrajectoryValidationTable,
-            )
-            self.logic.populateMasterTrajectoryValidationTable(validationTable, validationRows)
-            self._parameterNode.masterTrajectoryValidationTable = validationTable
-            self._parameterNode.trajectoryValidationSummaryJson = json.dumps(validationSummary, sort_keys=True)
-            if self._trajectoryValidationStatusLabel:
-                self._trajectoryValidationStatusLabel.text = str(validationSummary.get("StatusText", "Trajectory validation completed."))
+            autoAdjustSummary: dict[str, Any] = asdict(adjustResult)
+
+            if adjustResult.applied and adjustResult.selectedTargetPointRAS is not None:
+                adjustedTarget = np.array(adjustResult.selectedTargetPointRAS, dtype=float)
+                self._parameterNode.endpointsMarkups.SetNthControlPointPosition(
+                    0,
+                    float(adjustedTarget[0]),
+                    float(adjustedTarget[1]),
+                    float(adjustedTarget[2]),
+                )
+                _validationRows, validationSummary = self._runMasterTrajectoryValidation()
+                revalidationPass = bool(validationSummary.get("TrajectoryPass", False))
+                minDistanceText = (
+                    f"{float(adjustResult.selectedMinDistanceMm):.2f} mm"
+                    if math.isfinite(float(adjustResult.selectedMinDistanceMm))
+                    else "n/a"
+                )
+                statusText = (
+                    f"Auto-adjust applied: endpoint shifted {float(adjustResult.selectedEndpointShiftMm):.1f} mm, "
+                    f"min clearance {minDistanceText}. "
+                    f"{str(validationSummary.get('StatusText', ''))}"
+                ).strip()
+                autoAdjustSummary["revalidatedTrajectoryPass"] = bool(revalidationPass)
+                autoAdjustSummary["revalidationStatusText"] = str(validationSummary.get("StatusText", ""))
+                autoAdjustSummary["statusText"] = statusText
+                if self._trajectoryValidationStatusLabel:
+                    self._setStatusLabelText(self._trajectoryValidationStatusLabel, statusText)
+                self._logStepTrace(
+                    "Step4",
+                    (
+                        f"Auto-adjust applied. ShiftMm={float(adjustResult.selectedEndpointShiftMm):.3f}, "
+                        f"MinDistanceMm={float(adjustResult.selectedMinDistanceMm):.3f}, "
+                        f"RevalidationPass={bool(revalidationPass)}, "
+                        f"Checked={int(adjustResult.checkedCandidateCount)}, "
+                        f"InsideTumor={int(adjustResult.insideTumorCandidateCount)}, "
+                        f"ZeroIntersection={int(adjustResult.zeroIntersectionCandidateCount)}"
+                    ),
+                )
+            else:
+                statusText = str(adjustResult.statusText).strip() or (
+                    f"No safe adjustment found within {AUTO_ADJUST_MAX_ENDPOINT_SHIFT_MM:.1f} mm; endpoint unchanged."
+                )
+                autoAdjustSummary["statusText"] = statusText
+                if self._trajectoryValidationStatusLabel:
+                    self._setStatusLabelText(self._trajectoryValidationStatusLabel, statusText)
+                self._logStepTrace(
+                    "Step4",
+                    (
+                        f"Auto-adjust not applied. Reason='{str(adjustResult.reason)}', "
+                        f"Checked={int(adjustResult.checkedCandidateCount)}, "
+                        f"InsideTumor={int(adjustResult.insideTumorCandidateCount)}, "
+                        f"ZeroIntersection={int(adjustResult.zeroIntersectionCandidateCount)}"
+                    ),
+                )
+
+            self._parameterNode.endpointAutoAdjustSummaryJson = json.dumps(autoAdjustSummary, sort_keys=True)
             self._updateButtonStates()
 
     def onLockMasterPlanButton(self) -> None:
@@ -2097,7 +3677,10 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self._parameterNode.masterTrajectoryLocked = True
             self._setMasterTrajectoryLocked(True)
             if self._coaxialStatusLabel:
-                self._coaxialStatusLabel.text = "Master plan locked. Choose a technique and compute the coaxial plan."
+                self._setStatusLabelText(
+                    self._coaxialStatusLabel,
+                    "Master plan locked. Choose a technique and compute the coaxial plan.",
+                )
             self._updateButtonStates()
 
     def onResetMasterPlanButton(self) -> None:
@@ -2113,47 +3696,161 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             snapshotValues = self._jsonSummary(self._parameterNode.masterPlanSnapshotJson)
             if not snapshotValues:
                 raise ValueError("Lock the master plan before computing the coaxial plan.")
-            geometryEntry = self._selectedGeometryEntry()
-            activeElementLengthMm = float(snapshotValues.get("activeElementLengthMm", geometryEntry.activeElementLengthMm if geometryEntry else 0.0))
-            trajectory = ProbeTrajectory(
+            selectedGeometryEntry = self._selectedGeometryEntry()
+            snapshotGeometryId = str(snapshotValues.get("geometryId", "")).strip()
+            snapshotGeometryEntry = (
+                self.logic.geometryCatalogEntryById(snapshotGeometryId)
+                if snapshotGeometryId
+                else None
+            )
+            geometryEntry = snapshotGeometryEntry or selectedGeometryEntry
+            if geometryEntry is None:
+                geometryCatalogEntries = self.logic.loadGeometryCatalog()
+                if len(geometryCatalogEntries) > 0:
+                    geometryEntry = geometryCatalogEntries[0]
+
+            snapshotActiveElementLengthMm = float(snapshotValues.get("activeElementLengthMm", 0.0) or 0.0)
+            geometryActiveElementLengthMm = float(geometryEntry.activeElementLengthMm) if geometryEntry else 0.0
+            # Prefer current catalog geometry values to avoid stale locked snapshots carrying old lengths.
+            activeElementLengthMm = geometryActiveElementLengthMm if geometryActiveElementLengthMm > 0.0 else snapshotActiveElementLengthMm
+            if activeElementLengthMm <= 0.0:
+                raise ValueError("Active-element length is not available. Select a valid ablation geometry and relock the plan.")
+            if (
+                snapshotActiveElementLengthMm > 0.0
+                and not math.isclose(snapshotActiveElementLengthMm, activeElementLengthMm, abs_tol=1e-3)
+            ):
+                logging.warning(
+                    "Coaxial active-element mismatch (snapshot=%.1f mm, catalog=%.1f mm). Using %.1f mm.",
+                    snapshotActiveElementLengthMm,
+                    geometryActiveElementLengthMm,
+                    activeElementLengthMm,
+                )
+            snapshotTrajectory = ProbeTrajectory(
                 entryPointRAS=tuple(float(value) for value in snapshotValues.get("entryPointRAS", (0.0, 0.0, 0.0))),
                 targetPointRAS=tuple(float(value) for value in snapshotValues.get("targetPointRAS", (0.0, 0.0, 0.0))),
                 directionVector=tuple(float(value) for value in snapshotValues.get("directionVector", (0.0, 0.0, -1.0))),
                 lengthMm=float(snapshotValues.get("trajectoryLengthMm", 0.0)),
                 trajectoryIndex=0,
+                label="Master",
+                role="Master",
+                angleDeg=None,
+                radialOffsetMm=0.0,
+                derivedFromMaster=False,
             )
-            coaxialSummary = self.logic.computeCoaxialPlanFromTrajectory(
-                trajectory,
-                str(self._parameterNode.coaxialTechnique or "PullBack"),
-                activeElementLengthMm,
-            )
+            trajectories: list[ProbeTrajectory]
+            if self._isMultiTrajectoryArrayMode():
+                arrayConfig = self._currentDerivedTrajectoryArrayConfig()
+                trajectories = self.logic.generateDerivedParallelTrajectories(
+                    snapshotTrajectory,
+                    derivedCount=int(arrayConfig.derivedTrajectoryCount),
+                    radiusMm=float(arrayConfig.radiusMm),
+                    angleOffsetDeg=float(arrayConfig.angleOffsetDeg),
+                    includeMaster=bool(arrayConfig.includeMasterTrajectory),
+                )
+            else:
+                trajectories = [snapshotTrajectory]
+            if len(trajectories) <= 0:
+                raise ValueError("No trajectories are available for coaxial planning.")
+
+            coaxialSpareMm = float(max(0.0, self._parameterNode.coaxialSpareMm))
+            selectedTechnique = str(self._parameterNode.coaxialTechnique or "PullBack")
+            coaxialRows: list[dict[str, Any]] = []
+            lineSpecs: list[tuple[Sequence[float], Sequence[float], str]] = []
+            navigationTargets: list[tuple[float, float, float]] = []
+            firstCoaxialSummary: CoaxialPlanSummary | None = None
+            for trajectory in trajectories:
+                coaxialSummary = self.logic.computeCoaxialPlanFromTrajectory(
+                    trajectory,
+                    selectedTechnique,
+                    activeElementLengthMm,
+                    coaxialSpareMm,
+                )
+                if firstCoaxialSummary is None:
+                    firstCoaxialSummary = coaxialSummary
+                lineStartPointRAS = (
+                    trajectory.targetPointRAS
+                    if str(coaxialSummary.technique or "") == "PushThrough"
+                    else trajectory.entryPointRAS
+                )
+                roleName = str(trajectory.role or f"Trajectory {int(trajectory.trajectoryIndex) + 1:02d}")
+                coaxialRows.append(
+                    {
+                        "TrajectoryIndex": int(trajectory.trajectoryIndex + 1),
+                        "Role": roleName,
+                        "Source": "derived" if bool(trajectory.derivedFromMaster) else "master",
+                        "Technique": str(coaxialSummary.technique or selectedTechnique),
+                        "ActiveElementLengthMm": float(coaxialSummary.activeElementLengthMm),
+                        "SpareMm": float(coaxialSummary.spareMm),
+                        "PushThroughOffsetMm": float(coaxialSummary.pushThroughOffsetMm),
+                        "EntryPointRAS": self._formatRasPoint(trajectory.entryPointRAS),
+                        "TargetPointRAS": self._formatRasPoint(trajectory.targetPointRAS),
+                        "NavigationTargetRAS": self._formatRasPoint(coaxialSummary.navigationTargetRAS),
+                    }
+                )
+                lineSpecs.append((lineStartPointRAS, coaxialSummary.navigationTargetRAS, roleName))
+                navigationTargets.append(tuple(float(value) for value in coaxialSummary.navigationTargetRAS))
+
             coaxialTable = self.logic.createOrReuseOwnedOutputNode(
                 "vtkMRMLTableNode",
                 COAXIAL_PLAN_TABLE_NODE_NAME,
                 GENERATED_COAXIAL_PLAN_TABLE_ATTRIBUTE,
                 self._parameterNode.coaxialPlanTable,
             )
-            self.logic.populateKeyValueTable(coaxialTable, asdict(coaxialSummary))
+            if len(coaxialRows) == 1 and firstCoaxialSummary is not None:
+                self.logic.populateKeyValueTable(coaxialTable, asdict(firstCoaxialSummary))
+            else:
+                self.logic.populateCoaxialPlanTable(coaxialTable, coaxialRows)
             self._parameterNode.coaxialPlanTable = coaxialTable
-            self._parameterNode.coaxialPlanSummaryJson = json.dumps(asdict(coaxialSummary), sort_keys=True)
+            if len(coaxialRows) == 1 and firstCoaxialSummary is not None:
+                coaxialSummaryPayload = asdict(firstCoaxialSummary)
+                coaxialSummaryPayload["planningMode"] = str(self._parameterNode.trajectoryPlanningMode or "Single")
+                coaxialSummaryPayload["trajectoryCount"] = 1
+                coaxialSummaryPayload["rows"] = coaxialRows
+            else:
+                coaxialSummaryPayload = {
+                    "planningMode": str(self._parameterNode.trajectoryPlanningMode or "Single"),
+                    "trajectoryCount": int(len(coaxialRows)),
+                    "technique": selectedTechnique,
+                    "activeElementLengthMm": float(activeElementLengthMm),
+                    "spareMm": float(coaxialSpareMm),
+                    "pushThroughOffsetMm": float(activeElementLengthMm + coaxialSpareMm),
+                    "notes": (
+                        f"{selectedTechnique} coaxial plan computed for {len(coaxialRows)} trajectories."
+                    ),
+                    "rows": coaxialRows,
+                }
+            self._parameterNode.coaxialPlanSummaryJson = json.dumps(coaxialSummaryPayload, sort_keys=True)
             coaxialTargetNode = self.logic.createOrReuseOwnedOutputNode(
                 "vtkMRMLMarkupsFiducialNode",
                 COAXIAL_NAVIGATION_TARGET_NODE_NAME,
                 GENERATED_COAXIAL_TARGET_ATTRIBUTE,
                 self._parameterNode.coaxialNavigationTarget,
             )
+            if len(navigationTargets) <= 0:
+                raise ValueError("No coaxial navigation targets were computed.")
             slicer.util.updateMarkupsControlPointsFromArray(
                 coaxialTargetNode,
-                np.array([coaxialSummary.navigationTargetRAS], dtype=float),
+                np.array(navigationTargets, dtype=float),
             )
+            if hasattr(coaxialTargetNode, "SetNthControlPointLabel"):
+                for rowIndex, rowValues in enumerate(coaxialRows):
+                    coaxialTargetNode.SetNthControlPointLabel(rowIndex, f"{str(rowValues.get('Role', '')).strip()} Nav")
             coaxialTargetNode.SetLocked(True)
             self._parameterNode.coaxialNavigationTarget = coaxialTargetNode
-            self.logic.createOrUpdateCoaxialLine(
-                trajectory.entryPointRAS,
-                coaxialSummary.navigationTargetRAS,
+            self.logic.createOrUpdateCoaxialLines(lineSpecs)
+            self._logStepTrace(
+                "Step6",
+                (
+                    f"Coaxial plan computed for {len(coaxialRows)} trajectory(ies) "
+                    f"(mode='{self._parameterNode.trajectoryPlanningMode or 'Single'}', "
+                    f"technique='{selectedTechnique}', spareMm={coaxialSpareMm:.1f})."
+                ),
             )
             if self._coaxialStatusLabel:
-                self._coaxialStatusLabel.text = str(coaxialSummary.notes)
+                self._setStatusLabelText(
+                    self._coaxialStatusLabel,
+                    str(coaxialSummaryPayload.get("notes", "Coaxial plan computed.")),
+                )
             self._updateButtonStates()
 
     def onLoadSampleCaseButton(self) -> None:
@@ -2163,12 +3860,28 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             selectedScenePath = self._selectedSampleCaseScenePath().strip()
             if not selectedScenePath:
                 raise ValueError("Select a sample case scene before loading.")
+            self._logStepTrace("Step1", f"Load bundled sample requested: {selectedScenePath}")
             self.logic.loadBundledSampleScene(selectedScenePath)
             # Scene load triggers module-scene events, but run one more initialization pass to refresh selectors.
             self.initializeParameterNode()
+            self._applyDefaultCtAbdomenDisplay()
             if self._parameterNode:
                 self._parameterNode.caseFolderPath = ""
+                self._parameterNode.generatedProbeNodeIDs = "[]"
+                self._parameterNode.generatedTrajectoryLineIDs = "[]"
+            self.logic.removeGeneratedProbeNodes()
+            self.logic.removeGeneratedTrajectoryLines()
+            self._clearOwnedDerivedOutputs(clearReferences=True, clearBeginnerOutputs=False)
             self._clearOwnedBeginnerOutputs(clearReferences=True, unlockPlan=True)
+            if self._parameterNode:
+                tumorName = self._parameterNode.tumorSegmentation.GetName() if self._parameterNode.tumorSegmentation else "(none)"
+                criticalName = (
+                    self._parameterNode.riskStructuresSegmentation.GetName()
+                    if self._parameterNode.riskStructuresSegmentation
+                    else "(none)"
+                )
+                self._logStepTrace("Step1", f"Sample load completed. Tumor='{tumorName}', Critical structures='{criticalName}'")
+            self._traceStep123State("onLoadSampleCaseButton", force=True)
             self._updateButtonStates()
 
     def onPlaceProbesButton(self) -> None:
@@ -2188,11 +3901,11 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             if BEGINNER_WORKFLOW_MODE and controlPointCount != 2:
                 raise ValueError(
                     f"Beginner workflow expects exactly 2 control points, but found {controlPointCount}. "
-                    "Place one entry point and one applicator endpoint."
+                    "Place one applicator endpoint and one entry point (endpoint first)."
                 )
             if controlPointCount % 2 != 0:
                 raise ValueError(
-                    f"Endpoint markups has {controlPointCount} control points. Add one more point to complete entry/target pairs."
+                    f"Endpoint markups has {controlPointCount} control points. Add one more point to complete endpoint/entry pairs."
                 )
             resolvedReferenceProbeSegmentation = self.logic.resolveUsableReferenceProbeSegmentation(
                 self._parameterNode.referenceProbeSegmentation
@@ -2205,11 +3918,21 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             existingProbeNodeIDs = self.logic.resolveExistingNodeIDs(
                 self.logic.deserializeNodeIDs(self._parameterNode.generatedProbeNodeIDs)
             )
-            trajectories = self.logic.extractTrajectoriesFromMarkups(self._parameterNode.endpointsMarkups, strictEven=True)
+            trajectories = self._plannedTrajectoryBundle(requireValidatedMasterForArray=True)
+            if len(trajectories) == 0:
+                raise ValueError("No trajectories are available for placement.")
+            self._logStepTrace(
+                "Step5",
+                (
+                    f"Place trajectory bundle requested (count={len(trajectories)}, "
+                    f"mode='{self._parameterNode.trajectoryPlanningMode or 'Single'}', "
+                    f"clearPrevious={bool(self._parameterNode.clearPreviousGeneratedProbes)})."
+                ),
+            )
             if self._parameterNode.clearPreviousGeneratedProbes:
                 self.logic.removeGeneratedProbeNodes()
                 self.logic.removeGeneratedTrajectoryLines()
-                self._clearOwnedDerivedOutputs(clearReferences=True)
+                self._clearOwnedDerivedOutputs(clearReferences=True, clearBeginnerOutputs=False)
                 self._parameterNode.generatedProbeNodeIDs = "[]"
                 self._parameterNode.generatedTrajectoryLineIDs = "[]"
                 existingProbeNodeIDs = []
@@ -2222,12 +3945,23 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self._parameterNode.generatedProbeNodeIDs = self.logic.serializeNodeIDs(trackedProbeNodeIDs)
 
             # Probe placement invalidates previously merged/evaluated module-owned outputs.
-            self._clearOwnedDerivedOutputs(clearReferences=True)
-            self._clearOwnedBeginnerOutputs(clearReferences=True, unlockPlan=True)
+            self._clearOwnedDerivedOutputs(clearReferences=True, clearBeginnerOutputs=False)
+            self._clearOwnedBeginnerOutputs(clearReferences=True, unlockPlan=True, clearTrajectoryValidation=False)
 
             if self._parameterNode.createTrajectoryLinesOnPlacement:
-                generatedLineNodeIDs = self.logic.createTrajectoryLines(trajectories, clearExisting=True)
+                if self._isMultiTrajectoryArrayMode():
+                    generatedLineNodeIDs = self.logic.createOrUpdateDerivedTrajectoryPreview(trajectories, clearExisting=True)
+                else:
+                    generatedLineNodeIDs = self.logic.createTrajectoryLines(trajectories, clearExisting=True)
                 self._parameterNode.generatedTrajectoryLineIDs = self.logic.serializeNodeIDs(generatedLineNodeIDs)
+                self._parameterNode.derivedTrajectoryPreviewNode = (
+                    slicer.mrmlScene.GetNodeByID(generatedLineNodeIDs[0])
+                    if len(generatedLineNodeIDs) > 0
+                    else None
+                )
+            else:
+                self._parameterNode.generatedTrajectoryLineIDs = "[]"
+                self._parameterNode.derivedTrajectoryPreviewNode = None
 
             trajectorySummaryTable = self.logic.createOrReuseOwnedOutputNode(
                 "vtkMRMLTableNode",
@@ -2238,7 +3972,18 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             trajectoryMetrics = self.logic.computeTrajectoryMetrics(trajectories)
             self.logic.populateTrajectorySummaryTable(trajectorySummaryTable, trajectoryMetrics)
             self._parameterNode.trajectorySummaryTable = trajectorySummaryTable
+            self._publishDerivedTrajectoryBundleSummary(
+                trajectories,
+                evaluateAgainstCriticalStructures=EVALUATE_DERIVED_BUNDLE_INLINE_ON_PLACEMENT,
+            )
 
+            self._logStepTrace(
+                "Step5",
+                (
+                    f"Placement completed (placed={len(generatedProbeNodeIDs)}, "
+                    f"previewLines={len(self.logic.deserializeNodeIDs(self._parameterNode.generatedTrajectoryLineIDs))})."
+                ),
+            )
             self._updateButtonStates()
 
     def onCreateTrajectoryLinesButton(self) -> None:
@@ -2255,17 +4000,88 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             if BEGINNER_WORKFLOW_MODE and controlPointCount != 2:
                 raise ValueError(
                     f"Beginner workflow expects exactly 2 control points, but found {controlPointCount}. "
-                    "Place one entry point and one applicator endpoint."
+                    "Place one applicator endpoint and one entry point (endpoint first)."
                 )
             if controlPointCount % 2 != 0:
                 raise ValueError(
-                    f"Endpoint markups has {controlPointCount} control points. Add one more point to complete entry/target pairs."
+                    f"Endpoint markups has {controlPointCount} control points. Add one more point to complete endpoint/entry pairs."
                 )
-            trajectories = self.logic.extractTrajectoriesFromMarkups(self._parameterNode.endpointsMarkups, strictEven=True)
-            generatedLineNodeIDs = self.logic.createTrajectoryLines(trajectories, clearExisting=True)
+            self._logStepTrace(
+                "Step3",
+                f"Preview trajectories requested (points={controlPointCount}, mode='{self._parameterNode.trajectoryPlanningMode or 'Single'}').",
+            )
+            trajectories = self._plannedTrajectoryBundle(requireValidatedMasterForArray=True)
+            if self._isMultiTrajectoryArrayMode():
+                generatedLineNodeIDs = self.logic.createOrUpdateDerivedTrajectoryPreview(trajectories, clearExisting=True)
+            else:
+                generatedLineNodeIDs = self.logic.createTrajectoryLines(trajectories, clearExisting=True)
             self._parameterNode.generatedTrajectoryLineIDs = self.logic.serializeNodeIDs(generatedLineNodeIDs)
-            self._clearOwnedBeginnerOutputs(clearReferences=True, unlockPlan=True)
+            self._parameterNode.derivedTrajectoryPreviewNode = (
+                slicer.mrmlScene.GetNodeByID(generatedLineNodeIDs[0])
+                if len(generatedLineNodeIDs) > 0
+                else None
+            )
+            self._publishDerivedTrajectoryBundleSummary(trajectories, evaluateAgainstCriticalStructures=False)
+            self._ensurePrimaryVolumeVisibleInSlices(fit=False)
+            self._logStepTrace("Step3", f"Preview generated trajectory lines: {len(generatedLineNodeIDs)}")
+            self._traceStep123State("onCreateTrajectoryLinesButton", force=True)
             self._updateButtonStates()
+
+    def onPreviewDerivedArrayButton(self) -> None:
+        with slicer.util.tryWithErrorDisplay(_("Failed to preview derived trajectory array."), waitCursor=True):
+            if not self.logic or not self._parameterNode:
+                raise RuntimeError("Module logic is not initialized.")
+            if not self._isMultiTrajectoryArrayMode():
+                raise ValueError("Switch planning mode to 'Multiple trajectories' before previewing a derived array.")
+            arrayConfig = self._currentDerivedTrajectoryArrayConfig()
+            self._logStepTrace(
+                "Step3",
+                (
+                    "Preview derived array requested "
+                    f"(derivedCount={int(arrayConfig.derivedTrajectoryCount)}, "
+                    f"radiusMm={float(arrayConfig.radiusMm):.1f}, "
+                    f"angleOffsetDeg={float(arrayConfig.angleOffsetDeg):.1f}, "
+                    f"includeMaster={bool(arrayConfig.includeMasterTrajectory)})."
+                ),
+            )
+
+            trajectories = self._plannedTrajectoryBundle(requireValidatedMasterForArray=True)
+            if len(trajectories) == 0:
+                raise ValueError("No trajectories are available to preview.")
+
+            generatedLineNodeIDs = self.logic.createOrUpdateDerivedTrajectoryPreview(trajectories, clearExisting=True)
+            self._parameterNode.generatedTrajectoryLineIDs = self.logic.serializeNodeIDs(generatedLineNodeIDs)
+            firstPreviewNode = (
+                slicer.mrmlScene.GetNodeByID(generatedLineNodeIDs[0])
+                if len(generatedLineNodeIDs) > 0
+                else None
+            )
+            self._parameterNode.derivedTrajectoryPreviewNode = firstPreviewNode
+            self._publishDerivedTrajectoryBundleSummary(trajectories, evaluateAgainstCriticalStructures=False)
+            self._ensurePrimaryVolumeVisibleInSlices(fit=False)
+            self._logStepTrace("Step3", f"Preview derived array generated trajectory lines: {len(generatedLineNodeIDs)}")
+            self._traceStep123State("onPreviewDerivedArrayButton", force=True)
+            self._updateButtonStates()
+
+    def onClearDerivedArrayButton(self) -> None:
+        if not self.logic or not self._parameterNode:
+            return
+        self.logic.removeGeneratedTrajectoryLines()
+        self._parameterNode.generatedTrajectoryLineIDs = "[]"
+        if self.logic.removeNodeIfOwned(
+            self._parameterNode.derivedTrajectorySummaryTable,
+            GENERATED_DERIVED_TRAJECTORY_SUMMARY_TABLE_ATTRIBUTE,
+        ):
+            self._parameterNode.derivedTrajectorySummaryTable = None
+        else:
+            self._parameterNode.derivedTrajectorySummaryTable = None
+        self._parameterNode.derivedTrajectoryPreviewNode = None
+        self._parameterNode.derivedTrajectoryBundleSummaryJson = "{}"
+        if self._derivedArrayStatusLabel:
+            self._setStatusLabelText(self._derivedArrayStatusLabel, "Array not generated.")
+        self._logStepTrace("Step3", "Derived array preview cleared.")
+        self._traceStep123State("onClearDerivedArrayButton", force=True)
+        self._updateButtonStates()
 
     def onMergeTranslatedProbesButton(self) -> None:
         with slicer.util.tryWithErrorDisplay(_("Failed to merge translated probes."), waitCursor=True):
@@ -2295,13 +4111,19 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self._parameterNode.resultTable = None
             self._parameterNode.planSummaryTable = None
             self._parameterNode.marginThresholdSummaryTable = None
-            self._clearOwnedBeginnerOutputs(clearReferences=True, unlockPlan=True)
+            self._clearOwnedBeginnerOutputs(clearReferences=True, unlockPlan=True, clearTrajectoryValidation=False)
             self._updateButtonStates()
 
     def onRegisterTumorButton(self) -> None:
         with slicer.util.tryWithErrorDisplay(_("Failed to register tumor fiducials."), waitCursor=True):
             if not self.logic or not self._parameterNode:
                 raise RuntimeError("Module logic is not initialized.")
+            nativeCount = self._markupsPointCount(self._parameterNode.nativeFiducials)
+            registeredCount = self._markupsPointCount(self._parameterNode.registeredFiducials)
+            self._logStepTrace(
+                "Step2",
+                f"Apply fiducial registration requested (nativePts={nativeCount}, registeredPts={registeredCount}).",
+            )
             transformNode = self.logic.registerTumorToFiducials(
                 self._parameterNode.tumorSegmentation,
                 self._parameterNode.nativeFiducials,
@@ -2309,24 +4131,54 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 self._parameterNode.tumorTransform,
             )
             self._parameterNode.tumorTransform = transformNode
+            self._logStepTrace("Step2", f"Registration completed. Transform='{self._nodeDisplayName(transformNode)}'")
             if self._segmentEditorStatusLabel:
-                self._segmentEditorStatusLabel.text = "Fiducial registration applied to the tumor segmentation."
+                self._setStatusLabelText(
+                    self._segmentEditorStatusLabel,
+                    "Fiducial registration applied to the tumor segmentation.",
+                )
+            self._traceStep123State("onRegisterTumorButton", force=True)
             self._updateButtonStates()
 
     def onHardenTumorTransformButton(self) -> None:
         with slicer.util.tryWithErrorDisplay(_("Failed to harden tumor transform."), waitCursor=True):
             if not self.logic or not self._parameterNode:
                 raise RuntimeError("Module logic is not initialized.")
+            self._logStepTrace(
+                "Step2",
+                f"Harden registration requested for tumor='{self._nodeDisplayName(self._parameterNode.tumorSegmentation)}'.",
+            )
             self.logic.hardenTumorTransform(self._parameterNode.tumorSegmentation)
+            self._logStepTrace("Step2", "Tumor transform hardened.")
             if self._segmentEditorStatusLabel:
-                self._segmentEditorStatusLabel.text = "Tumor registration hardened into the segmentation geometry."
+                self._setStatusLabelText(
+                    self._segmentEditorStatusLabel,
+                    "Tumor registration hardened into the segmentation geometry.",
+                )
+            self._traceStep123State("onHardenTumorTransformButton", force=True)
             self._updateButtonStates()
 
-    def onRiskStructuresSegmentationChanged(self, _node=None) -> None:
+    def onRiskStructuresSegmentationChanged(self, node=None) -> None:
         if not self.logic or not self._parameterNode:
             return
-
-        self._parameterNode.criticalStructuresSegmentation = self._parameterNode.riskStructuresSegmentation
+        selector = getattr(self.ui, "riskStructuresSegmentationSelector", None) if hasattr(self, "ui") else None
+        sanitizedNode = self._sanitizeSelectorNodeClass(
+            selector,
+            node,
+            "vtkMRMLSegmentationNode",
+            "riskStructuresSegmentationSelector",
+        )
+        if self._sceneImportInProgress or self._sceneIsBusy():
+            return
+        if self._parameterNode.riskStructuresSegmentation is not sanitizedNode:
+            self._parameterNode.riskStructuresSegmentation = sanitizedNode
+        self._parameterNode.criticalStructuresSegmentation = sanitizedNode
+        if self.logic.removeNodeIfOwned(
+            self._parameterNode.derivedTrajectorySummaryTable,
+            GENERATED_DERIVED_TRAJECTORY_SUMMARY_TABLE_ATTRIBUTE,
+        ):
+            self._parameterNode.derivedTrajectorySummaryTable = None
+        self._parameterNode.derivedTrajectoryBundleSummaryJson = "{}"
         self._clearOwnedSafetyOutputs(clearReferences=True)
         self._clearOwnedBeginnerOutputs(clearReferences=True)
         self._updateButtonStates()
@@ -2418,7 +4270,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             if not self._parameterNode.endpointsMarkups:
                 raise ValueError("Select an endpoint markups node before evaluating probe coordination.")
 
-            trajectories = self.logic.extractTrajectoriesFromMarkups(self._parameterNode.endpointsMarkups, strictEven=True)
+            trajectories = self._plannedTrajectoryBundle(requireValidatedMasterForArray=True)
             if len(trajectories) == 0:
                 raise ValueError("No valid trajectories are available for probe coordination evaluation.")
             self._evaluateAndPublishProbeCoordination(trajectories, updateStatusLabel=True)
@@ -2426,6 +4278,8 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
 
     def onEvaluateMarginsButton(self) -> None:
         with slicer.util.tryWithErrorDisplay(_("Failed to evaluate margins."), waitCursor=True):
+            stepStartTime = time.perf_counter()
+            self._logStepTrace("Step5", "Evaluate MAM requested.")
             if not self.logic or not self._parameterNode:
                 raise RuntimeError("Module logic is not initialized.")
             if not self._parameterNode.tumorSegmentation:
@@ -2441,21 +4295,34 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 probeSegmentation = self.logic.mergeProbeInstances(generatedProbeNodeIDs, self._parameterNode.combinedProbeSegmentation)
                 self._parameterNode.combinedProbeSegmentation = probeSegmentation
 
+            signedDistanceStartTime = time.perf_counter()
             outputMarginModel, resultTable, summary = self.logic.evaluateMargins(
                 self._parameterNode.tumorSegmentation,
                 probeSegmentation,
                 self._parameterNode.outputMarginModel,
                 self._parameterNode.resultTable,
             )
+            self._logStepTrace(
+                "Step5",
+                f"Signed-margin computation finished in {time.perf_counter() - signedDistanceStartTime:.2f}s.",
+            )
             self._parameterNode.outputMarginModel = outputMarginModel
             self._parameterNode.resultTable = resultTable
             logging.info("Margin summary: %s", summary)
 
+            mamColoringStartTime = time.perf_counter()
             signedMarginValues = self.logic.getSignedMarginValues(outputMarginModel)
             mamAssessmentSummary = self.logic.applyBeginnerMamColoring(outputMarginModel, float(self._parameterNode.mamMm))
+            self._logStepTrace(
+                "Step5",
+                f"MAM coloring + summary finished in {time.perf_counter() - mamColoringStartTime:.2f}s.",
+            )
             self._parameterNode.mamAssessmentSummaryJson = json.dumps(mamAssessmentSummary, sort_keys=True)
             if self._marginAssessmentStatusLabel:
-                self._marginAssessmentStatusLabel.text = str(mamAssessmentSummary.get("StatusText", "MAM assessment completed."))
+                self._setStatusLabelText(
+                    self._marginAssessmentStatusLabel,
+                    str(mamAssessmentSummary.get("StatusText", "MAM assessment completed.")),
+                )
             if bool(mamAssessmentSummary.get("MamPass", False)):
                 slicer.util.infoDisplay(str(mamAssessmentSummary.get("StatusText", "MAM satisfied.")), windowTitle="MAM Validation")
             trajectoryCount = len(
@@ -2496,9 +4363,17 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self._parameterNode.planSummaryTable = planSummaryTable
             self._parameterNode.marginThresholdSummaryTable = marginThresholdSummaryTable
 
+            safetyStartTime = time.perf_counter()
             structureSafetySummaryRows, structureSafetyThresholdRows = self.logic.evaluateStructureSafety(
                 self._parameterNode.criticalStructuresSegmentation,
                 probeSegmentation,
+            )
+            self._logStepTrace(
+                "Step5",
+                (
+                    f"Structure-safety evaluation finished in {time.perf_counter() - safetyStartTime:.2f}s "
+                    f"for {len(structureSafetySummaryRows)} segments."
+                ),
             )
             if len(structureSafetySummaryRows) > 0:
                 structureSafetySummaryTable = self.logic.createOrReuseOwnedOutputNode(
@@ -2535,6 +4410,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                     self._clearOwnedCoordinationOutputs(clearReferences=True)
             elif BEGINNER_WORKFLOW_MODE:
                 self._clearOwnedCoordinationOutputs(clearReferences=True)
+            self._logStepTrace("Step5", f"Evaluate MAM total time: {time.perf_counter() - stepStartTime:.2f}s.")
             self._updateButtonStates()
 
     def onRecolorMarginsButton(self) -> None:
@@ -3030,6 +4906,97 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         return trajectories[0]
 
     @staticmethod
+    def createOrthogonalArrayBasis(directionVectorRAS: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
+        direction = _normalize_vector(directionVectorRAS)
+        seedAxes = (
+            np.array([0.0, 0.0, 1.0], dtype=float),
+            np.array([0.0, 1.0, 0.0], dtype=float),
+            np.array([1.0, 0.0, 0.0], dtype=float),
+        )
+        for seedAxis in seedAxes:
+            projected = seedAxis - (np.dot(seedAxis, direction) * direction)
+            projectedNorm = float(np.linalg.norm(projected))
+            if projectedNorm <= 1e-6:
+                continue
+            basisU = projected / projectedNorm
+            basisV = np.cross(direction, basisU)
+            basisVNorm = float(np.linalg.norm(basisV))
+            if basisVNorm <= 1e-6:
+                continue
+            return basisU, (basisV / basisVNorm)
+        raise RuntimeError("Failed to construct a deterministic orthogonal basis for trajectory-array generation.")
+
+    @staticmethod
+    def _derivedTrajectoryRoleName(derivedCount: int, derivedIndex: int) -> str:
+        if int(derivedCount) == 4:
+            cardinalRoles = ("North", "East", "South", "West")
+            return cardinalRoles[int(derivedIndex) % 4]
+        return f"Derived {int(derivedIndex) + 1:02d}"
+
+    def generateDerivedParallelTrajectories(
+        self,
+        masterTrajectory: ProbeTrajectory,
+        derivedCount: int,
+        radiusMm: float,
+        angleOffsetDeg: float = 0.0,
+        includeMaster: bool = True,
+    ) -> list[ProbeTrajectory]:
+        if int(derivedCount) < 1:
+            raise ValueError("Derived trajectory count must be at least 1.")
+        radiusMm = float(max(0.0, radiusMm))
+
+        masterEntry = np.asarray(masterTrajectory.entryPointRAS, dtype=float)
+        masterTarget = np.asarray(masterTrajectory.targetPointRAS, dtype=float)
+        masterDirection = _normalize_vector(masterTrajectory.directionVector)
+        basisU, basisV = self.createOrthogonalArrayBasis(masterDirection)
+        angularStepDeg = 360.0 / float(derivedCount)
+
+        bundle: list[ProbeTrajectory] = []
+        if includeMaster:
+            bundle.append(
+                ProbeTrajectory(
+                    entryPointRAS=tuple(float(value) for value in masterEntry.tolist()),
+                    targetPointRAS=tuple(float(value) for value in masterTarget.tolist()),
+                    directionVector=tuple(float(value) for value in masterDirection.tolist()),
+                    lengthMm=float(masterTrajectory.lengthMm),
+                    trajectoryIndex=len(bundle),
+                    label="Master",
+                    sourceControlPointIndices=masterTrajectory.sourceControlPointIndices,
+                    role="Master",
+                    angleDeg=None,
+                    radialOffsetMm=0.0,
+                    derivedFromMaster=False,
+                )
+            )
+
+        for derivedIndex in range(int(derivedCount)):
+            angleDeg = float(angleOffsetDeg + (angularStepDeg * float(derivedIndex)))
+            angleRad = math.radians(angleDeg)
+            offset = radiusMm * ((math.cos(angleRad) * basisU) + (math.sin(angleRad) * basisV))
+            childEntry = masterEntry + offset
+            childTarget = masterTarget + offset
+            role = self._derivedTrajectoryRoleName(int(derivedCount), int(derivedIndex))
+            bundle.append(
+                ProbeTrajectory(
+                    entryPointRAS=tuple(float(value) for value in childEntry.tolist()),
+                    targetPointRAS=tuple(float(value) for value in childTarget.tolist()),
+                    directionVector=tuple(float(value) for value in masterDirection.tolist()),
+                    lengthMm=float(masterTrajectory.lengthMm),
+                    trajectoryIndex=len(bundle),
+                    label=role,
+                    sourceControlPointIndices=masterTrajectory.sourceControlPointIndices,
+                    role=role,
+                    angleDeg=float(((angleDeg % 360.0) + 360.0) % 360.0),
+                    radialOffsetMm=radiusMm,
+                    derivedFromMaster=True,
+                )
+            )
+
+        for trajectoryIndex, trajectory in enumerate(bundle):
+            trajectory.trajectoryIndex = int(trajectoryIndex)
+        return bundle
+
+    @staticmethod
     def tableNodeRowCount(tableNode: vtkMRMLTableNode | None) -> int:
         if not tableNode or not slicer.mrmlScene.IsNodePresent(tableNode):
             return 0
@@ -3130,6 +5097,11 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             "CombinedProbeSegmentationName": parameterNode.combinedProbeSegmentation.GetName() if parameterNode.combinedProbeSegmentation else "",
             "GeneratedProbeCount": int(generatedProbeCount),
             "GeneratedTrajectoryLineCount": int(len(self.resolveExistingNodeIDs(self.deserializeNodeIDs(parameterNode.generatedTrajectoryLineIDs)))),
+            "TrajectoryPlanningMode": str(parameterNode.trajectoryPlanningMode or "Single"),
+            "DerivedTrajectoryCount": int(parameterNode.derivedTrajectoryCount),
+            "DerivedTrajectoryRadiusMm": float(parameterNode.derivedTrajectoryRadiusMm),
+            "DerivedTrajectoryAngleOffsetDeg": float(parameterNode.derivedTrajectoryAngleOffsetDeg),
+            "IncludeMasterTrajectoryInArray": bool(parameterNode.includeMasterTrajectoryInArray),
             "ExportMode": exportConfig.exportMode,
             "SelectedExportScenarioID": exportConfig.selectedExportScenarioID,
         }
@@ -3147,6 +5119,7 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
 
         if exportConfig.includeTrajectoryTables:
             addTable("trajectory_summary.csv", parameterNode.trajectorySummaryTable)
+            addTable("derived_trajectory_bundle_summary.csv", parameterNode.derivedTrajectorySummaryTable)
         if exportConfig.includeWorkingPlan:
             addTable("plan_summary.csv", parameterNode.planSummaryTable)
             addTable("margin_threshold_summary.csv", parameterNode.marginThresholdSummaryTable)
@@ -3393,6 +5366,12 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             raise ValueError(f"Sample scene file was not found: {resolvedScenePath}")
         if resolvedScenePath.suffix.lower() != ".mrml":
             raise ValueError(f"Unsupported sample scene format: {resolvedScenePath.name}")
+
+        # Prefer direct case-asset loading for bundled cohort scenes to avoid noisy scene-import warnings
+        # when optional subject-hierarchy references differ across Slicer builds.
+        if SurgicalVision3D_PlannerLogic._loadBundledCaseAssetsFromDirectory(resolvedScenePath.parent):
+            return
+
         unresolvedMissingFiles = SurgicalVision3D_PlannerLogic._repairMissingSceneReferences(resolvedScenePath)
         if len(unresolvedMissingFiles) > 0:
             formattedMissingFiles = "\n".join(f"- {missingPath}" for missingPath in unresolvedMissingFiles[:12])
@@ -3416,36 +5395,60 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         if not caseDirectory.exists():
             return False
 
-        slicer.mrmlScene.Clear(0)
+        scene = slicer.mrmlScene
+        startedStates: list[int] = []
         loadedAny = False
 
-        volumeCandidates = sorted(
-            (
-                candidatePath
-                for candidatePath in caseDirectory.glob("*.nrrd")
-                if candidatePath.is_file() and not candidatePath.name.lower().endswith(".seg.nrrd")
-            ),
-            key=lambda candidatePath: (-int(candidatePath.stat().st_size), candidatePath.name.lower()),
-        )
-        for volumePath in volumeCandidates[:1]:
+        for stateName in ("BatchProcessState", "ImportState"):
+            stateId = getattr(scene, stateName, None)
+            if stateId is None:
+                continue
             try:
-                loadedAny = bool(slicer.util.loadVolume(str(volumePath))) or loadedAny
+                scene.StartState(int(stateId))
+                startedStates.append(int(stateId))
             except Exception:
-                logging.exception("Failed to load fallback sample-case volume: %s", volumePath)
+                pass
 
-        segmentationCandidates = sorted(
-            (
-                candidatePath
-                for candidatePath in caseDirectory.glob("*.seg.nrrd")
-                if candidatePath.is_file()
-            ),
-            key=lambda candidatePath: candidatePath.name.lower(),
-        )
-        for segmentationPath in segmentationCandidates:
-            try:
-                loadedAny = bool(slicer.util.loadSegmentation(str(segmentationPath))) or loadedAny
-            except Exception:
-                logging.exception("Failed to load fallback sample-case segmentation: %s", segmentationPath)
+        try:
+            scene.Clear(0)
+
+            volumeCandidates = sorted(
+                (
+                    candidatePath
+                    for candidatePath in caseDirectory.glob("*.nrrd")
+                    if candidatePath.is_file() and not candidatePath.name.lower().endswith(".seg.nrrd")
+                ),
+                key=lambda candidatePath: (-int(candidatePath.stat().st_size), candidatePath.name.lower()),
+            )
+            for volumePath in volumeCandidates[:1]:
+                try:
+                    loadedAny = bool(slicer.util.loadVolume(str(volumePath))) or loadedAny
+                except Exception:
+                    logging.exception("Failed to load fallback sample-case volume: %s", volumePath)
+
+            segmentationCandidates = sorted(
+                (
+                    candidatePath
+                    for candidatePath in caseDirectory.glob("*.seg.nrrd")
+                    if candidatePath.is_file()
+                ),
+                key=lambda candidatePath: candidatePath.name.lower(),
+            )
+            for segmentationPath in segmentationCandidates:
+                try:
+                    loadedAny = bool(slicer.util.loadSegmentation(str(segmentationPath))) or loadedAny
+                except Exception:
+                    logging.exception("Failed to load fallback sample-case segmentation: %s", segmentationPath)
+
+            logic = SurgicalVision3D_PlannerLogic()
+            for segmentationNode in slicer.util.getNodesByClass("vtkMRMLSegmentationNode"):
+                logic._ensureSegmentationReferenceImageGeometry(segmentationNode)
+        finally:
+            for stateId in reversed(startedStates):
+                try:
+                    scene.EndState(int(stateId))
+                except Exception:
+                    pass
 
         SurgicalVision3D_PlannerLogic().ensureReferenceProbeTemplatesLoaded()
         return loadedAny
@@ -3577,6 +5580,8 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         temporarySegmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", stlPath.stem)
         try:
             temporarySegmentationNode.CreateDefaultDisplayNodes()
+            SurgicalVision3D_PlannerLogic._preferClosedSurfaceSourceRepresentation(temporarySegmentationNode)
+            SurgicalVision3D_PlannerLogic()._ensureSegmentationReferenceImageGeometry(temporarySegmentationNode)
             segmentID = temporarySegmentationNode.AddSegmentFromClosedSurfaceRepresentation(
                 closedSurface,
                 stlPath.stem,
@@ -3629,6 +5634,12 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             key=lambda candidatePath: candidatePath.name.lower(),
         )
 
+    @staticmethod
+    def isReferenceProbeTemplateSegmentation(segmentationNode: vtkMRMLSegmentationNode | None) -> bool:
+        if not segmentationNode:
+            return False
+        return str(segmentationNode.GetAttribute(REFERENCE_PROBE_TEMPLATE_ATTRIBUTE) or "") == "1"
+
     def ensureReferenceProbeTemplatesLoaded(self) -> list[vtkMRMLSegmentationNode]:
         templatePaths = self.discoverReferenceProbeTemplateFiles()
         if len(templatePaths) == 0:
@@ -3660,6 +5671,8 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             templateName = self._referenceProbeTemplateDisplayName(templatePath)
             templateNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", templateName)
             templateNode.CreateDefaultDisplayNodes()
+            self._preferClosedSurfaceSourceRepresentation(templateNode)
+            self._ensureSegmentationReferenceImageGeometry(templateNode)
             segmentID = templateNode.AddSegmentFromClosedSurfaceRepresentation(closedSurface, templateName, [0.2, 0.8, 1.0])
             if not segmentID:
                 logging.warning("Failed to import reference probe template geometry into segmentation node: %s", templatePath)
@@ -4650,9 +6663,13 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
     def computeTrajectoryMetrics(trajectories: Sequence[ProbeTrajectory]) -> list[dict[str, float | int | str]]:
         metrics: list[dict[str, float | int | str]] = []
         for trajectory in trajectories:
+            role = str(trajectory.role or f"Trajectory {int(trajectory.trajectoryIndex) + 1:02d}")
+            source = "derived" if bool(trajectory.derivedFromMaster) else ("master" if role.lower() == "master" else "manual")
             metrics.append(
                 {
                     "TrajectoryIndex": int(trajectory.trajectoryIndex + 1),
+                    "Role": role,
+                    "Source": source,
                     "EntryR": float(trajectory.entryPointRAS[0]),
                     "EntryA": float(trajectory.entryPointRAS[1]),
                     "EntryS": float(trajectory.entryPointRAS[2]),
@@ -4663,6 +6680,8 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
                     "DirA": float(trajectory.directionVector[1]),
                     "DirS": float(trajectory.directionVector[2]),
                     "LengthMm": float(trajectory.lengthMm),
+                    "AngleDeg": float(trajectory.angleDeg) if trajectory.angleDeg is not None else float("nan"),
+                    "RadialOffsetMm": float(trajectory.radialOffsetMm),
                 }
             )
         return metrics
@@ -5070,24 +7089,55 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
 
         trajectories: list[ProbeTrajectory] = []
         for pointIndex in range(0, pointCount, 2):
-            entry = np.array(pointsRAS[pointIndex], dtype=float)
-            target = np.array(pointsRAS[pointIndex + 1], dtype=float)
-            direction = target - entry
+            # Point-pair order is endpoint first, entry second.
+            endpoint = np.array(pointsRAS[pointIndex], dtype=float)
+            entry = np.array(pointsRAS[pointIndex + 1], dtype=float)
+            if endpoint.size != 3 or entry.size != 3:
+                raise ValueError(
+                    f"Control-point pair {pointIndex}-{pointIndex + 1} must contain 3D coordinates."
+                )
+            if not np.all(np.isfinite(endpoint)) or not np.all(np.isfinite(entry)):
+                raise ValueError(
+                    f"Control-point pair {pointIndex}-{pointIndex + 1} contains non-finite coordinates."
+                )
+            direction = endpoint - entry
             length = float(np.linalg.norm(direction))
-            if length <= 1e-8:
+            if not math.isfinite(length) or length <= 1e-8:
                 raise ValueError(f"Control-point pair {pointIndex}-{pointIndex + 1} has zero length.")
 
             trajectory = ProbeTrajectory(
                 entryPointRAS=tuple(entry.tolist()),
-                targetPointRAS=tuple(target.tolist()),
+                targetPointRAS=tuple(endpoint.tolist()),
                 directionVector=tuple((direction / length).tolist()),
                 lengthMm=length,
                 trajectoryIndex=len(trajectories),
                 label=f"Trajectory {len(trajectories) + 1}",
                 sourceControlPointIndices=(pointIndex, pointIndex + 1),
+                role=f"Trajectory {len(trajectories) + 1:02d}",
+                angleDeg=None,
+                radialOffsetMm=0.0,
+                derivedFromMaster=False,
             )
             trajectories.append(trajectory)
         return trajectories
+
+    @staticmethod
+    def _validateTrajectoryGeometryForPlacement(trajectory: ProbeTrajectory) -> None:
+        entry = np.asarray(trajectory.entryPointRAS, dtype=float)
+        target = np.asarray(trajectory.targetPointRAS, dtype=float)
+        direction = np.asarray(trajectory.directionVector, dtype=float)
+        if entry.size != 3 or target.size != 3 or direction.size != 3:
+            raise ValueError(
+                f"Trajectory {int(trajectory.trajectoryIndex) + 1} has invalid coordinate dimensionality."
+            )
+        if not np.all(np.isfinite(entry)) or not np.all(np.isfinite(target)) or not np.all(np.isfinite(direction)):
+            raise ValueError(f"Trajectory {int(trajectory.trajectoryIndex) + 1} has non-finite coordinates.")
+        lengthMm = float(trajectory.lengthMm)
+        if not math.isfinite(lengthMm) or lengthMm <= 1e-8:
+            raise ValueError(f"Trajectory {int(trajectory.trajectoryIndex) + 1} has an invalid length.")
+        directionNorm = float(np.linalg.norm(direction))
+        if not math.isfinite(directionNorm) or directionNorm <= 1e-8:
+            raise ValueError(f"Trajectory {int(trajectory.trajectoryIndex) + 1} has an invalid direction vector.")
 
     def extractTrajectoriesFromMarkups(
         self,
@@ -5129,16 +7179,63 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             )
 
         self._ensureSegmentationHasClosedSurface(referenceProbeSegmentation)
+        sourceSegmentID = self.getWorkingSegmentID(referenceProbeSegmentation, "reference probe placement")
+        sourceSurface = vtk.vtkPolyData()
+        referenceProbeSegmentation.GetClosedSurfaceRepresentation(sourceSegmentID, sourceSurface)
+        if sourceSurface.GetNumberOfPoints() <= 0 or sourceSurface.GetNumberOfCells() <= 0:
+            raise RuntimeError("Reference probe segmentation has no usable closed-surface geometry.")
+        if not self._polyDataHasFinitePoints(sourceSurface):
+            raise RuntimeError("Reference probe segmentation has non-finite closed-surface coordinates.")
 
         generatedProbeNodeIDs: list[str] = []
-        for trajectory in trajectories:
-            probeNode = self._cloneReferenceProbe(referenceProbeSegmentation, trajectory.trajectoryIndex)
-            self._placeProbeNodeAlongTrajectory(probeNode, trajectory)
-            trajectory.generatedProbeNodeID = probeNode.GetID()
-            trajectory.status = "placed"
-            generatedProbeNodeIDs.append(probeNode.GetID())
+        try:
+            with self._mrmlBatchState("BatchProcessState"):
+                for trajectory in trajectories:
+                    self._validateTrajectoryGeometryForPlacement(trajectory)
+                    probeNode = self._cloneReferenceProbe(
+                        referenceProbeSegmentation,
+                        trajectory.trajectoryIndex,
+                        sourceSurface=sourceSurface,
+                    )
+                    self._placeProbeNodeAlongTrajectory(probeNode, trajectory)
+                    trajectory.generatedProbeNodeID = probeNode.GetID()
+                    trajectory.status = "placed"
+                    generatedProbeNodeIDs.append(probeNode.GetID())
+        except Exception:
+            self.removeNodesByIDs(generatedProbeNodeIDs)
+            raise
 
         return generatedProbeNodeIDs
+
+    @staticmethod
+    def _configureTrajectoryLineDisplay(
+        lineDisplayNode,
+        colorRGB: tuple[float, float, float] | None = None,
+    ) -> None:
+        if not lineDisplayNode:
+            return
+        lineDisplayNode.SetVisibility(True)
+        if hasattr(lineDisplayNode, "SetVisibility2D"):
+            lineDisplayNode.SetVisibility2D(True)
+        if hasattr(lineDisplayNode, "SetVisibility3D"):
+            lineDisplayNode.SetVisibility3D(True)
+        if hasattr(lineDisplayNode, "SetSliceProjection"):
+            lineDisplayNode.SetSliceProjection(True)
+        if hasattr(lineDisplayNode, "SetSliceProjectionOpacity"):
+            lineDisplayNode.SetSliceProjectionOpacity(1.0)
+        if hasattr(lineDisplayNode, "SetSliceProjectionOutlinedBehindSlicePlane"):
+            lineDisplayNode.SetSliceProjectionOutlinedBehindSlicePlane(False)
+        if hasattr(lineDisplayNode, "SetLineThickness"):
+            lineDisplayNode.SetLineThickness(0.9)
+        elif hasattr(lineDisplayNode, "SetLineWidth"):
+            lineDisplayNode.SetLineWidth(4.0)
+        if hasattr(lineDisplayNode, "SetOpacity"):
+            lineDisplayNode.SetOpacity(1.0)
+        lineDisplayNode.SetPropertiesLabelVisibility(False)
+        lineDisplayNode.SetPointLabelsVisibility(False)
+        lineDisplayNode.SetSelectable(False)
+        if colorRGB is not None:
+            lineDisplayNode.SetColor(float(colorRGB[0]), float(colorRGB[1]), float(colorRGB[2]))
 
     def createTrajectoryLines(self, trajectories: Sequence[ProbeTrajectory], clearExisting: bool = True) -> list[str]:
         if clearExisting:
@@ -5146,18 +7243,61 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
 
         generatedLineNodeIDs: list[str] = []
         for trajectory in trajectories:
+            self._validateTrajectoryGeometryForPlacement(trajectory)
             lineNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsLineNode", f"SV3D Trajectory {trajectory.trajectoryIndex + 1:02d}")
             pointArray = np.array([trajectory.entryPointRAS, trajectory.targetPointRAS], dtype=float)
             slicer.util.updateMarkupsControlPointsFromArray(lineNode, pointArray)
             lineNode.SetAttribute(GENERATED_TRAJECTORY_LINE_ATTRIBUTE, "1")
+            if hasattr(lineNode, "CreateDefaultDisplayNodes"):
+                lineNode.CreateDefaultDisplayNodes()
 
             lineDisplayNode = lineNode.GetDisplayNode()
-            if lineDisplayNode:
-                lineDisplayNode.SetPropertiesLabelVisibility(False)
-                lineDisplayNode.SetPointLabelsVisibility(False)
-                lineDisplayNode.SetSelectable(False)
+            self._configureTrajectoryLineDisplay(lineDisplayNode)
 
             generatedLineNodeIDs.append(lineNode.GetID())
+        return generatedLineNodeIDs
+
+    def createOrUpdateDerivedTrajectoryPreview(
+        self,
+        trajectories: Sequence[ProbeTrajectory],
+        clearExisting: bool = True,
+    ) -> list[str]:
+        if clearExisting:
+            self.removeGeneratedTrajectoryLines()
+
+        generatedLineNodeIDs: list[str] = []
+        derivedOrdinal = 0
+        for trajectory in trajectories:
+            self._validateTrajectoryGeometryForPlacement(trajectory)
+            isMaster = (not trajectory.derivedFromMaster) and (str(trajectory.role or "").strip().lower() == "master")
+            if isMaster:
+                nodeName = "SV3D Master Trajectory"
+            elif trajectory.derivedFromMaster:
+                derivedOrdinal += 1
+                nodeName = f"SV3D Derived Trajectory {derivedOrdinal:02d}"
+            else:
+                nodeName = f"SV3D Trajectory {int(trajectory.trajectoryIndex) + 1:02d}"
+
+            lineNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsLineNode", nodeName)
+            pointArray = np.array([trajectory.entryPointRAS, trajectory.targetPointRAS], dtype=float)
+            slicer.util.updateMarkupsControlPointsFromArray(lineNode, pointArray)
+            lineNode.SetAttribute(GENERATED_TRAJECTORY_LINE_ATTRIBUTE, "1")
+            lineNode.SetAttribute("SurgicalVision3D_Planner.TrajectoryRole", str(trajectory.role or ""))
+            lineNode.SetAttribute("SurgicalVision3D_Planner.DerivedFromMaster", "1" if trajectory.derivedFromMaster else "0")
+            if hasattr(lineNode, "CreateDefaultDisplayNodes"):
+                lineNode.CreateDefaultDisplayNodes()
+
+            lineDisplayNode = lineNode.GetDisplayNode()
+            if isMaster:
+                lineColor = (0.10, 0.75, 0.95)
+            elif trajectory.derivedFromMaster:
+                lineColor = (1.00, 0.62, 0.15)
+            else:
+                lineColor = (0.25, 0.80, 0.35)
+            self._configureTrajectoryLineDisplay(lineDisplayNode, colorRGB=lineColor)
+
+            generatedLineNodeIDs.append(lineNode.GetID())
+
         return generatedLineNodeIDs
 
     @staticmethod
@@ -5166,14 +7306,36 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         lineEndRAS: Sequence[float],
         closedSurface: vtk.vtkPolyData,
     ) -> bool:
-        if closedSurface is None or closedSurface.GetNumberOfPoints() <= 0:
+        if (
+            closedSurface is None
+            or closedSurface.GetNumberOfPoints() <= 0
+            or closedSurface.GetNumberOfCells() <= 0
+        ):
             return False
-        obbTree = vtk.vtkOBBTree()
-        obbTree.SetDataSet(closedSurface)
-        obbTree.BuildLocator()
+
+        # Avoid OBBTree eigen-decomposition instability on degenerate surfaces
+        # (seen as vtkMath::Jacobi warnings) by using a static cell locator.
+        cellLocator = vtk.vtkStaticCellLocator()
+        cellLocator.SetDataSet(closedSurface)
+        cellLocator.BuildLocator()
+
         intersectionPoints = vtk.vtkPoints()
         intersectionCellIds = vtk.vtkIdList()
-        intersectionCount = obbTree.IntersectWithLine(lineStartRAS, lineEndRAS, intersectionPoints, intersectionCellIds)
+        try:
+            intersectionCount = cellLocator.IntersectWithLine(
+                lineStartRAS,
+                lineEndRAS,
+                1e-6,
+                intersectionPoints,
+                intersectionCellIds,
+            )
+        except TypeError:
+            intersectionCount = cellLocator.IntersectWithLine(
+                lineStartRAS,
+                lineEndRAS,
+                intersectionPoints,
+                intersectionCellIds,
+            )
         return int(intersectionCount) > 0 or intersectionPoints.GetNumberOfPoints() > 0
 
     @staticmethod
@@ -5198,6 +7360,243 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         finiteDistances = [distance for distance in distances if math.isfinite(distance)]
         return float(min(finiteDistances)) if len(finiteDistances) > 0 else float("nan")
 
+    @staticmethod
+    def _polyDataHasFinitePoints(polyData: vtk.vtkPolyData | None) -> bool:
+        if polyData is None:
+            return False
+        pointCount = int(polyData.GetNumberOfPoints())
+        if pointCount <= 0:
+            return False
+        bounds = [0.0] * 6
+        polyData.GetBounds(bounds)
+        if any(not math.isfinite(float(bound)) for bound in bounds):
+            return False
+        point = [0.0, 0.0, 0.0]
+        for pointIndex in range(pointCount):
+            polyData.GetPoint(pointIndex, point)
+            if not (
+                math.isfinite(float(point[0]))
+                and math.isfinite(float(point[1]))
+                and math.isfinite(float(point[2]))
+            ):
+                return False
+        return True
+
+    @classmethod
+    def _prepareClosedSurfaceForTrajectoryValidation(
+        cls,
+        closedSurface: vtk.vtkPolyData | None,
+    ) -> vtk.vtkPolyData | None:
+        if (
+            closedSurface is None
+            or closedSurface.GetNumberOfPoints() <= 0
+            or closedSurface.GetNumberOfCells() <= 0
+        ):
+            return None
+
+        surfaceCopy = vtk.vtkPolyData()
+        surfaceCopy.DeepCopy(closedSurface)
+
+        triangleFilter = vtk.vtkTriangleFilter()
+        triangleFilter.SetInputData(surfaceCopy)
+        if hasattr(triangleFilter, "PassLinesOff"):
+            triangleFilter.PassLinesOff()
+        if hasattr(triangleFilter, "PassVertsOff"):
+            triangleFilter.PassVertsOff()
+        triangleFilter.Update()
+
+        cleanFilter = vtk.vtkCleanPolyData()
+        cleanFilter.SetInputConnection(triangleFilter.GetOutputPort())
+        cleanFilter.Update()
+
+        preparedSurface = vtk.vtkPolyData()
+        preparedSurface.DeepCopy(cleanFilter.GetOutput())
+        if preparedSurface.GetNumberOfPoints() <= 2 or preparedSurface.GetNumberOfCells() <= 0:
+            return None
+        if not cls._polyDataHasFinitePoints(preparedSurface):
+            return None
+        return preparedSurface
+
+    def autoAdjustMasterTrajectoryEndpoint(
+        self,
+        trajectory: ProbeTrajectory,
+        criticalStructuresSegmentation: vtkMRMLSegmentationNode | None,
+        tumorSegmentation: vtkMRMLSegmentationNode | None,
+        maxEndpointShiftMm: float = AUTO_ADJUST_MAX_ENDPOINT_SHIFT_MM,
+        shiftStepMm: float = AUTO_ADJUST_ENDPOINT_SHIFT_STEP_MM,
+        azimuthSampleCount: int = AUTO_ADJUST_AZIMUTH_SAMPLE_COUNT,
+    ) -> EndpointAutoAdjustResult:
+        if tumorSegmentation is None:
+            raise ValueError("Tumor segmentation is required for endpoint auto-adjust.")
+        if criticalStructuresSegmentation is None:
+            raise ValueError("Critical-structures segmentation is required for endpoint auto-adjust.")
+
+        trajectoryLengthMm = float(trajectory.lengthMm)
+        if trajectoryLengthMm <= 1e-6:
+            raise ValueError("Master trajectory must have non-zero length for endpoint auto-adjust.")
+
+        maxEndpointShiftMm = float(max(0.0, maxEndpointShiftMm))
+        shiftStepMm = float(max(0.0, shiftStepMm))
+        azimuthSampleCount = max(1, int(azimuthSampleCount))
+        statusTextNoSolution = f"No safe adjustment found within {maxEndpointShiftMm:.1f} mm; endpoint unchanged."
+        if maxEndpointShiftMm <= 0.0 or shiftStepMm <= 0.0:
+            return EndpointAutoAdjustResult(
+                applied=False,
+                reason="InvalidSearchConfiguration",
+                statusText=statusTextNoSolution,
+                maxEndpointShiftMm=maxEndpointShiftMm,
+                shiftStepMm=shiftStepMm,
+                azimuthSampleCount=azimuthSampleCount,
+                checkedCandidateCount=0,
+                insideTumorCandidateCount=0,
+                zeroIntersectionCandidateCount=0,
+                selectedTargetPointRAS=tuple(float(value) for value in trajectory.targetPointRAS),
+            )
+
+        tumorSegmentID = self.findPreferredSegmentID(
+            tumorSegmentation,
+            DEFAULT_TUMOR_SEGMENT_NAMES,
+            "master trajectory endpoint auto-adjust",
+            fallbackToFirst=True,
+        )
+        self._ensureSegmentationHasClosedSurface(tumorSegmentation)
+        tumorClosedSurface = vtk.vtkPolyData()
+        tumorSegmentation.GetClosedSurfaceRepresentation(tumorSegmentID, tumorClosedSurface)
+        preparedTumorSurface = self._prepareClosedSurfaceForTrajectoryValidation(tumorClosedSurface)
+        if preparedTumorSurface is None:
+            raise RuntimeError("master trajectory endpoint auto-adjust: tumor closed-surface geometry is unavailable.")
+
+        excludedSegmentID = ""
+        if criticalStructuresSegmentation.GetID() == tumorSegmentation.GetID():
+            excludedSegmentID = tumorSegmentID
+
+        preparedCriticalSurfaces: list[vtk.vtkPolyData] = []
+        segmentInfos = self.getValidSegmentationSegments(
+            criticalStructuresSegmentation,
+            "master trajectory endpoint auto-adjust",
+        )
+        for segmentInfo in segmentInfos:
+            segmentID = str(segmentInfo["segmentID"])
+            if excludedSegmentID and segmentID == excludedSegmentID:
+                continue
+            closedSurface = vtk.vtkPolyData()
+            criticalStructuresSegmentation.GetClosedSurfaceRepresentation(segmentID, closedSurface)
+            preparedSurface = self._prepareClosedSurfaceForTrajectoryValidation(closedSurface)
+            if preparedSurface is None:
+                logging.warning(
+                    "master trajectory endpoint auto-adjust: segment '%s' has unstable closed-surface geometry and will be skipped.",
+                    segmentID,
+                )
+                continue
+            preparedCriticalSurfaces.append(preparedSurface)
+        if len(preparedCriticalSurfaces) <= 0:
+            raise RuntimeError(
+                "master trajectory endpoint auto-adjust: no usable critical-structure closed-surface segments were available."
+            )
+
+        entryPoint = np.array(trajectory.entryPointRAS, dtype=float)
+        originalTargetPoint = np.array(trajectory.targetPointRAS, dtype=float)
+        originalDirection = _normalize_vector(trajectory.directionVector)
+        basisU, basisV = self.createOrthogonalArrayBasis(originalDirection)
+
+        checkedCandidateCount = 0
+        insideTumorCandidateCount = 0
+        zeroIntersectionCandidateCount = 0
+        bestScore: tuple[float, float, int, int] | None = None
+        bestCandidateTargetPoint: np.ndarray | None = None
+        bestCandidateShiftMm = 0.0
+        bestCandidateMinDistanceMm = float("nan")
+        bestShellIndex = -1
+        bestAzimuthIndex = -1
+
+        shellCount = int(math.floor((maxEndpointShiftMm + 1e-6) / shiftStepMm))
+        for shellIndex in range(1, shellCount + 1):
+            requestedShiftMm = float(shellIndex) * shiftStepMm
+            if requestedShiftMm > (maxEndpointShiftMm + 1e-6):
+                break
+            if requestedShiftMm > (2.0 * trajectoryLengthMm):
+                continue
+
+            cappedRatio = min(1.0, max(0.0, requestedShiftMm / (2.0 * trajectoryLengthMm)))
+            polarAngleRad = 2.0 * math.asin(cappedRatio)
+            sinPolar = math.sin(polarAngleRad)
+            cosPolar = math.cos(polarAngleRad)
+
+            for azimuthIndex in range(azimuthSampleCount):
+                azimuthRad = (2.0 * math.pi * float(azimuthIndex)) / float(azimuthSampleCount)
+                azimuthDirection = (math.cos(azimuthRad) * basisU) + (math.sin(azimuthRad) * basisV)
+                candidateDirection = (cosPolar * originalDirection) + (sinPolar * azimuthDirection)
+                candidateDirectionNorm = float(np.linalg.norm(candidateDirection))
+                if candidateDirectionNorm <= 1e-8:
+                    continue
+                candidateDirection /= candidateDirectionNorm
+                candidateTargetPoint = entryPoint + (trajectoryLengthMm * candidateDirection)
+                checkedCandidateCount += 1
+
+                if not self._isPointInsideClosedSurface(candidateTargetPoint, preparedTumorSurface):
+                    continue
+                insideTumorCandidateCount += 1
+
+                intersectsCriticalStructure = False
+                minDistanceMm = float("inf")
+                for preparedSurface in preparedCriticalSurfaces:
+                    if self._lineIntersectsClosedSurface(entryPoint, candidateTargetPoint, preparedSurface):
+                        intersectsCriticalStructure = True
+                    candidateDistanceMm = self._lineToClosedSurfaceMinDistanceMm(
+                        entryPoint,
+                        candidateTargetPoint,
+                        preparedSurface,
+                    )
+                    if math.isfinite(candidateDistanceMm):
+                        minDistanceMm = min(minDistanceMm, float(candidateDistanceMm))
+                if intersectsCriticalStructure:
+                    continue
+
+                zeroIntersectionCandidateCount += 1
+                if not math.isfinite(minDistanceMm):
+                    minDistanceMm = float("nan")
+                actualShiftMm = float(np.linalg.norm(candidateTargetPoint - originalTargetPoint))
+                distanceScore = float(minDistanceMm) if math.isfinite(minDistanceMm) else -math.inf
+                candidateScore = (-distanceScore, actualShiftMm, int(shellIndex), int(azimuthIndex))
+                if bestScore is None or candidateScore < bestScore:
+                    bestScore = candidateScore
+                    bestCandidateTargetPoint = candidateTargetPoint
+                    bestCandidateShiftMm = actualShiftMm
+                    bestCandidateMinDistanceMm = float(minDistanceMm)
+                    bestShellIndex = int(shellIndex)
+                    bestAzimuthIndex = int(azimuthIndex)
+
+        if bestCandidateTargetPoint is None:
+            return EndpointAutoAdjustResult(
+                applied=False,
+                reason="NoZeroIntersectionCandidateWithinCap",
+                statusText=statusTextNoSolution,
+                maxEndpointShiftMm=maxEndpointShiftMm,
+                shiftStepMm=shiftStepMm,
+                azimuthSampleCount=azimuthSampleCount,
+                checkedCandidateCount=int(checkedCandidateCount),
+                insideTumorCandidateCount=int(insideTumorCandidateCount),
+                zeroIntersectionCandidateCount=int(zeroIntersectionCandidateCount),
+                selectedTargetPointRAS=tuple(float(value) for value in originalTargetPoint.tolist()),
+            )
+
+        return EndpointAutoAdjustResult(
+            applied=True,
+            reason="AppliedBestZeroIntersectionCandidate",
+            statusText="Auto-adjust found a safe endpoint candidate.",
+            maxEndpointShiftMm=maxEndpointShiftMm,
+            shiftStepMm=shiftStepMm,
+            azimuthSampleCount=azimuthSampleCount,
+            checkedCandidateCount=int(checkedCandidateCount),
+            insideTumorCandidateCount=int(insideTumorCandidateCount),
+            zeroIntersectionCandidateCount=int(zeroIntersectionCandidateCount),
+            selectedEndpointShiftMm=float(bestCandidateShiftMm),
+            selectedMinDistanceMm=float(bestCandidateMinDistanceMm),
+            selectedTargetPointRAS=tuple(float(value) for value in bestCandidateTargetPoint.tolist()),
+            selectedShellIndex=int(bestShellIndex),
+            selectedAzimuthIndex=int(bestAzimuthIndex),
+        )
+
     def evaluateMasterTrajectoryAgainstCriticalStructures(
         self,
         trajectory: ProbeTrajectory,
@@ -5217,22 +7616,37 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             )
 
         validationRows: list[dict[str, float | int | bool | str]] = []
-        for segmentInfo in self.getValidSegmentationSegments(criticalStructuresSegmentation, "master trajectory validation"):
+        try:
+            segmentInfos = self.getValidSegmentationSegments(
+                criticalStructuresSegmentation,
+                "master trajectory validation",
+            )
+        except RuntimeError:
+            segmentInfos = []
+
+        for segmentInfo in segmentInfos:
             segmentID = str(segmentInfo["segmentID"])
             if excludedSegmentID and segmentID == excludedSegmentID:
                 continue
 
             closedSurface = vtk.vtkPolyData()
             criticalStructuresSegmentation.GetClosedSurfaceRepresentation(segmentID, closedSurface)
+            preparedSurface = self._prepareClosedSurfaceForTrajectoryValidation(closedSurface)
+            if preparedSurface is None:
+                logging.warning(
+                    "master trajectory validation: segment '%s' has unstable closed-surface geometry and will be skipped.",
+                    segmentID,
+                )
+                continue
             intersects = self._lineIntersectsClosedSurface(
                 trajectory.entryPointRAS,
                 trajectory.targetPointRAS,
-                closedSurface,
+                preparedSurface,
             )
             minDistanceMm = self._lineToClosedSurfaceMinDistanceMm(
                 trajectory.entryPointRAS,
                 trajectory.targetPointRAS,
-                closedSurface,
+                preparedSurface,
             )
             validationRows.append(
                 {
@@ -5268,25 +7682,149 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         }
         return validationRows, summary
 
+    @staticmethod
+    def _formatRasPoint(pointRAS: Sequence[float]) -> str:
+        return ",".join(f"{float(value):.3f}" for value in pointRAS)
+
+    def evaluateDerivedTrajectoryBundleAgainstCriticalStructures(
+        self,
+        trajectories: Sequence[ProbeTrajectory],
+        criticalStructuresSegmentation: vtkMRMLSegmentationNode | None,
+        tumorSegmentation: vtkMRMLSegmentationNode | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        bundleRows: list[dict[str, Any]] = []
+        intersectingTrajectoryCount = 0
+        minDistanceValues: list[float] = []
+        preparedStructureSurfaces: list[vtk.vtkPolyData] = []
+
+        if criticalStructuresSegmentation:
+            excludedSegmentID = ""
+            if tumorSegmentation and criticalStructuresSegmentation.GetID() == tumorSegmentation.GetID():
+                excludedSegmentID = self.findPreferredSegmentID(
+                    tumorSegmentation,
+                    DEFAULT_TUMOR_SEGMENT_NAMES,
+                    "derived trajectory bundle validation",
+                    fallbackToFirst=True,
+                )
+
+            try:
+                segmentInfos = self.getValidSegmentationSegments(
+                    criticalStructuresSegmentation,
+                    "derived trajectory bundle validation",
+                )
+            except RuntimeError:
+                segmentInfos = []
+
+            for segmentInfo in segmentInfos:
+                segmentID = str(segmentInfo["segmentID"])
+                if excludedSegmentID and segmentID == excludedSegmentID:
+                    continue
+                closedSurface = vtk.vtkPolyData()
+                criticalStructuresSegmentation.GetClosedSurfaceRepresentation(segmentID, closedSurface)
+                preparedSurface = self._prepareClosedSurfaceForTrajectoryValidation(closedSurface)
+                if preparedSurface is None:
+                    logging.warning(
+                        "derived trajectory bundle validation: segment '%s' has unstable closed-surface geometry and will be skipped.",
+                        segmentID,
+                    )
+                    continue
+                preparedStructureSurfaces.append(preparedSurface)
+
+        for trajectory in trajectories:
+            intersects = False
+            minDistanceMm = float("nan")
+            checkedStructureCount = int(len(preparedStructureSurfaces))
+            if checkedStructureCount > 0:
+                trajectoryDistanceValues: list[float] = []
+                for preparedSurface in preparedStructureSurfaces:
+                    if self._lineIntersectsClosedSurface(
+                        trajectory.entryPointRAS,
+                        trajectory.targetPointRAS,
+                        preparedSurface,
+                    ):
+                        intersects = True
+                    surfaceDistanceMm = self._lineToClosedSurfaceMinDistanceMm(
+                        trajectory.entryPointRAS,
+                        trajectory.targetPointRAS,
+                        preparedSurface,
+                    )
+                    if math.isfinite(surfaceDistanceMm):
+                        trajectoryDistanceValues.append(float(surfaceDistanceMm))
+                if len(trajectoryDistanceValues) > 0:
+                    minDistanceMm = float(min(trajectoryDistanceValues))
+            if intersects:
+                intersectingTrajectoryCount += 1
+            if math.isfinite(minDistanceMm):
+                minDistanceValues.append(minDistanceMm)
+
+            bundleRows.append(
+                {
+                    "TrajectoryIndex": int(trajectory.trajectoryIndex + 1),
+                    "Role": str(trajectory.role or ""),
+                    "Source": "derived" if bool(trajectory.derivedFromMaster) else "master",
+                    "AngleDeg": float(trajectory.angleDeg) if trajectory.angleDeg is not None else float("nan"),
+                    "RadialOffsetMm": float(trajectory.radialOffsetMm),
+                    "EntryPointRAS": self._formatRasPoint(trajectory.entryPointRAS),
+                    "TargetPointRAS": self._formatRasPoint(trajectory.targetPointRAS),
+                    "IntersectsCriticalStructures": bool(intersects),
+                    "MinDistanceToCriticalStructuresMm": float(minDistanceMm),
+                    "CheckedStructureCount": int(checkedStructureCount),
+                }
+            )
+
+        trajectoryCount = int(len(trajectories))
+        if not criticalStructuresSegmentation:
+            statusText = "Critical-structures segmentation is not selected; bundle intersections were not evaluated."
+        elif len(preparedStructureSurfaces) <= 0:
+            statusText = "No usable critical-structure closed-surface segments were available for bundle evaluation."
+        elif trajectoryCount <= 0:
+            statusText = "No trajectories were available for bundle evaluation."
+        elif intersectingTrajectoryCount <= 0:
+            statusText = "Bundle valid: no critical-structure intersections detected."
+        else:
+            statusText = (
+                f"Bundle warning: {intersectingTrajectoryCount}/{trajectoryCount} trajectories intersect critical structures."
+            )
+
+        summary: dict[str, Any] = {
+            "TrajectoryCount": int(trajectoryCount),
+            "IntersectingTrajectoryCount": int(intersectingTrajectoryCount),
+            "NonIntersectingTrajectoryCount": int(max(0, trajectoryCount - intersectingTrajectoryCount)),
+            "MinDistanceToCriticalStructuresMm": (
+                float(min(minDistanceValues))
+                if len(minDistanceValues) > 0
+                else float("nan")
+            ),
+            "StatusText": statusText,
+            "CriticalStructuresAvailable": bool(criticalStructuresSegmentation is not None),
+        }
+        return bundleRows, summary
+
     def computeCoaxialPlanFromTrajectory(
         self,
         trajectory: ProbeTrajectory,
         technique: str,
         activeElementLengthMm: float,
+        spareMm: float = 0.0,
     ) -> CoaxialPlanSummary:
         normalizedDirection = _normalize_vector(trajectory.directionVector)
         techniqueName = str(technique or "PullBack")
+        activeElementLengthMm = float(max(0.0, activeElementLengthMm))
+        spareMm = float(max(0.0, spareMm))
+        pushThroughOffsetMm = float(activeElementLengthMm + spareMm)
         if techniqueName == "PushThrough":
-            navigationTarget = np.array(trajectory.targetPointRAS, dtype=float) - (normalizedDirection * float(activeElementLengthMm))
+            # Offset from endpoint back toward entry so endpoint-to-navigation distance equals active element + spare.
+            navigationTarget = np.array(trajectory.targetPointRAS, dtype=float) - (normalizedDirection * pushThroughOffsetMm)
             noteText = (
                 f"Push-through: navigate the coaxial needle to the derived target, then advance the applicator "
-                f"{float(activeElementLengthMm):.1f} mm."
+                f"{pushThroughOffsetMm:.1f} mm "
+                f"({activeElementLengthMm:.1f} mm active element + {spareMm:.1f} mm spare)."
             )
         else:
             navigationTarget = np.array(trajectory.targetPointRAS, dtype=float)
             noteText = (
                 f"Pull-back: navigate the coaxial needle to the locked endpoint, then retract the sheath to expose "
-                f"{float(activeElementLengthMm):.1f} mm of active element."
+                f"{activeElementLengthMm:.1f} mm of active element."
             )
 
         return CoaxialPlanSummary(
@@ -5295,6 +7833,8 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             navigationTargetRAS=tuple(float(value) for value in navigationTarget.tolist()),
             masterEntryPointRAS=tuple(float(value) for value in trajectory.entryPointRAS),
             masterTargetPointRAS=tuple(float(value) for value in trajectory.targetPointRAS),
+            spareMm=spareMm,
+            pushThroughOffsetMm=pushThroughOffsetMm,
             notes=noteText,
         )
 
@@ -5303,32 +7843,89 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         entryPointRAS: Sequence[float],
         navigationTargetRAS: Sequence[float],
     ):
-        existingLineNodes = [
-            node for node in slicer.util.getNodesByClass("vtkMRMLMarkupsLineNode")
-            if node.GetAttribute(GENERATED_COAXIAL_LINE_ATTRIBUTE) == "1"
-        ]
-        lineNode = existingLineNodes[0] if len(existingLineNodes) > 0 else slicer.mrmlScene.AddNewNodeByClass(
-            "vtkMRMLMarkupsLineNode",
-            COAXIAL_NAVIGATION_LINE_NODE_NAME,
+        createdLineNodeIDs = self.createOrUpdateCoaxialLines(
+            (
+                (entryPointRAS, navigationTargetRAS, "Master"),
+            )
         )
-        slicer.util.updateMarkupsControlPointsFromArray(
-            lineNode,
-            np.array([entryPointRAS, navigationTargetRAS], dtype=float),
-        )
-        lineNode.SetAttribute(GENERATED_COAXIAL_LINE_ATTRIBUTE, "1")
-        if lineNode.GetDisplayNode():
-            lineNode.GetDisplayNode().SetPropertiesLabelVisibility(False)
-            lineNode.GetDisplayNode().SetPointLabelsVisibility(False)
-        for redundantLineNode in existingLineNodes[1:]:
-            slicer.mrmlScene.RemoveNode(redundantLineNode)
-        return lineNode
+        if len(createdLineNodeIDs) <= 0:
+            return None
+        return slicer.mrmlScene.GetNodeByID(createdLineNodeIDs[0])
+
+    def createOrUpdateCoaxialLines(
+        self,
+        lineSpecifications: Sequence[tuple[Sequence[float], Sequence[float], str]],
+    ) -> list[str]:
+        self.removeNodesByAttribute("vtkMRMLMarkupsLineNode", GENERATED_COAXIAL_LINE_ATTRIBUTE)
+        if len(lineSpecifications) <= 0:
+            return []
+
+        createdLineNodeIDs: list[str] = []
+        isMultiLinePlan = len(lineSpecifications) > 1
+        for lineIndex, lineSpec in enumerate(lineSpecifications):
+            lineStartPointRAS, navigationTargetRAS, roleName = lineSpec
+            lineNodeName = (
+                f"{COAXIAL_NAVIGATION_LINE_NODE_NAME} {lineIndex + 1:02d}"
+                if isMultiLinePlan
+                else COAXIAL_NAVIGATION_LINE_NODE_NAME
+            )
+            lineNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsLineNode", lineNodeName)
+            slicer.util.updateMarkupsControlPointsFromArray(
+                lineNode,
+                np.array([lineStartPointRAS, navigationTargetRAS], dtype=float),
+            )
+            lineNode.SetAttribute(GENERATED_COAXIAL_LINE_ATTRIBUTE, "1")
+            lineNode.SetAttribute("SurgicalVision3D_Planner.TrajectoryRole", str(roleName or ""))
+            lineDisplayNode = lineNode.GetDisplayNode()
+            if lineDisplayNode:
+                lineDisplayNode.SetPropertiesLabelVisibility(False)
+                lineDisplayNode.SetPointLabelsVisibility(False)
+                lineDisplayNode.SetOpacity(1.0)
+                if hasattr(lineDisplayNode, "SetLineThickness"):
+                    lineDisplayNode.SetLineThickness(0.8)
+                elif hasattr(lineDisplayNode, "SetLineWidth"):
+                    lineDisplayNode.SetLineWidth(3.0)
+            createdLineNodeIDs.append(lineNode.GetID())
+        return createdLineNodeIDs
+
+    @staticmethod
+    @contextmanager
+    def _mrmlBatchState(*stateNames: str):
+        scene = slicer.mrmlScene
+        startedStateIds: list[int] = []
+        try:
+            for stateName in stateNames:
+                stateId = getattr(scene, stateName, None)
+                if stateId is None:
+                    continue
+                try:
+                    scene.StartState(int(stateId))
+                    startedStateIds.append(int(stateId))
+                except Exception:
+                    pass
+            yield
+        finally:
+            for stateId in reversed(startedStateIds):
+                try:
+                    scene.EndState(int(stateId))
+                except Exception:
+                    pass
 
     def removeNodesByAttribute(self, className: str, attributeName: str, attributeValue: str = "1", keepNodeID: str | None = None) -> None:
-        for node in slicer.util.getNodesByClass(className):
-            if keepNodeID and node.GetID() == keepNodeID:
-                continue
-            if node.GetAttribute(attributeName) == attributeValue:
-                slicer.mrmlScene.RemoveNode(node)
+        nodesToRemove = [
+            node
+            for node in slicer.util.getNodesByClass(className)
+            if not (keepNodeID and node.GetID() == keepNodeID)
+            and node.GetAttribute(attributeName) == attributeValue
+        ]
+        if len(nodesToRemove) <= 0:
+            return
+        useBatchState = str(className or "") == "vtkMRMLSegmentationNode"
+        stateContext = self._mrmlBatchState("BatchProcessState") if useBatchState else nullcontext()
+        with stateContext:
+            for node in nodesToRemove:
+                if node and slicer.mrmlScene.IsNodePresent(node):
+                    slicer.mrmlScene.RemoveNode(node)
 
     def removeGeneratedProbeNodes(self, keepNodeID: str | None = None) -> None:
         self.removeNodesByAttribute("vtkMRMLSegmentationNode", GENERATED_PROBE_ATTRIBUTE, keepNodeID=keepNodeID)
@@ -5337,10 +7934,20 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         self.removeNodesByAttribute("vtkMRMLMarkupsLineNode", GENERATED_TRAJECTORY_LINE_ATTRIBUTE)
 
     def removeNodesByIDs(self, nodeIDs: Sequence[str]) -> None:
+        if len(nodeIDs) <= 0:
+            return
+        useBatchState = False
         for nodeID in nodeIDs:
             node = slicer.mrmlScene.GetNodeByID(nodeID)
-            if node:
-                slicer.mrmlScene.RemoveNode(node)
+            if node and node.IsA("vtkMRMLSegmentationNode"):
+                useBatchState = True
+                break
+        stateContext = self._mrmlBatchState("BatchProcessState") if useBatchState else nullcontext()
+        with stateContext:
+            for nodeID in nodeIDs:
+                node = slicer.mrmlScene.GetNodeByID(nodeID)
+                if node and slicer.mrmlScene.IsNodePresent(node):
+                    slicer.mrmlScene.RemoveNode(node)
 
     def removeNodeIfOwned(self, node: vtk.vtkObject | None, ownershipAttribute: str, ownershipValue: str = "1") -> bool:
         if not node:
@@ -5349,8 +7956,13 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             return False
         if node.GetAttribute(ownershipAttribute) != ownershipValue:
             return False
-        slicer.mrmlScene.RemoveNode(node)
-        return True
+        useBatchState = bool(hasattr(node, "IsA") and node.IsA("vtkMRMLSegmentationNode"))
+        stateContext = self._mrmlBatchState("BatchProcessState") if useBatchState else nullcontext()
+        with stateContext:
+            if not slicer.mrmlScene.IsNodePresent(node):
+                return False
+            slicer.mrmlScene.RemoveNode(node)
+            return True
 
     def createOrReuseOwnedOutputNode(
         self,
@@ -5368,8 +7980,128 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
 
         outputNode.SetName(preferredName)
         outputNode.SetAttribute(ownershipAttribute, "1")
+        if className == "vtkMRMLSegmentationNode" and hasattr(outputNode, "GetSegmentation"):
+            self._preferClosedSurfaceSourceRepresentation(outputNode)
         self.removeNodesByAttribute(className, ownershipAttribute, keepNodeID=outputNode.GetID())
         return outputNode
+
+    @staticmethod
+    def _preferClosedSurfaceSourceRepresentation(segmentationNode: vtkMRMLSegmentationNode | None) -> None:
+        if not segmentationNode:
+            return
+        segmentation = segmentationNode.GetSegmentation()
+        if not segmentation:
+            return
+        try:
+            if hasattr(segmentation, "SetSourceRepresentationName"):
+                segmentation.SetSourceRepresentationName("Closed surface")
+            elif hasattr(segmentation, "SetMasterRepresentationName"):
+                segmentation.SetMasterRepresentationName("Closed surface")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _definedMarkupsPointCount(markupsNode: vtkMRMLMarkupsFiducialNode | None) -> int:
+        if not markupsNode:
+            return 0
+        if hasattr(markupsNode, "GetNumberOfDefinedControlPoints"):
+            return int(markupsNode.GetNumberOfDefinedControlPoints())
+        return int(markupsNode.GetNumberOfControlPoints())
+
+    @staticmethod
+    def primaryScalarVolumeNode():
+        volumeNodes = slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")
+        if len(volumeNodes) == 0:
+            return None
+
+        def voxelCount(volumeNode) -> int:
+            if not volumeNode or not hasattr(volumeNode, "GetImageData"):
+                return 0
+            imageData = volumeNode.GetImageData()
+            if imageData is None:
+                return 0
+            dimensions = imageData.GetDimensions()
+            if dimensions is None or len(dimensions) < 3:
+                return 0
+            return int(dimensions[0]) * int(dimensions[1]) * int(dimensions[2])
+
+        return max(
+            volumeNodes,
+            key=lambda volumeNode: (
+                voxelCount(volumeNode),
+                str(volumeNode.GetName() or "").lower(),
+            ),
+        )
+
+    def applyCtAbdomenDisplayToVolume(self, volumeNode) -> bool:
+        if not volumeNode:
+            return False
+        if hasattr(volumeNode, "CreateDefaultDisplayNodes"):
+            volumeNode.CreateDefaultDisplayNodes()
+        if not hasattr(volumeNode, "GetDisplayNode"):
+            return False
+
+        displayNode = volumeNode.GetDisplayNode()
+        if not displayNode:
+            return False
+
+        if hasattr(displayNode, "SetAutoWindowLevel"):
+            displayNode.SetAutoWindowLevel(False)
+        elif hasattr(displayNode, "AutoWindowLevelOff"):
+            displayNode.AutoWindowLevelOff()
+
+        if hasattr(displayNode, "SetWindowLevel"):
+            displayNode.SetWindowLevel(float(DEFAULT_CT_ABDOMEN_WINDOW), float(DEFAULT_CT_ABDOMEN_LEVEL))
+        else:
+            if hasattr(displayNode, "SetWindow"):
+                displayNode.SetWindow(float(DEFAULT_CT_ABDOMEN_WINDOW))
+            if hasattr(displayNode, "SetLevel"):
+                displayNode.SetLevel(float(DEFAULT_CT_ABDOMEN_LEVEL))
+
+        displayNode.Modified()
+        volumeNode.Modified()
+        return True
+
+    def _ensureSegmentationReferenceImageGeometry(self, segmentationNode: vtkMRMLSegmentationNode | None) -> None:
+        if not segmentationNode:
+            return
+        segmentation = segmentationNode.GetSegmentation()
+        if not segmentation:
+            return
+
+        referenceParameterName = ""
+        if hasattr(slicer, "vtkSegmentationConverter") and hasattr(slicer.vtkSegmentationConverter, "GetReferenceImageGeometryParameterName"):
+            referenceParameterName = str(slicer.vtkSegmentationConverter.GetReferenceImageGeometryParameterName() or "")
+        existingReferenceGeometry = ""
+        if referenceParameterName and hasattr(segmentation, "GetConversionParameter"):
+            existingReferenceGeometry = str(segmentation.GetConversionParameter(referenceParameterName) or "")
+        if existingReferenceGeometry.strip():
+            return
+
+        referenceVolumeNode = self.primaryScalarVolumeNode()
+        if referenceVolumeNode and hasattr(segmentationNode, "SetReferenceImageGeometryParameterFromVolumeNode"):
+            segmentationNode.SetReferenceImageGeometryParameterFromVolumeNode(referenceVolumeNode)
+
+    def prepareSegmentationForEditing(self, segmentationNode: vtkMRMLSegmentationNode | None) -> None:
+        if not segmentationNode or not slicer.mrmlScene.IsNodePresent(segmentationNode):
+            return
+        segmentation = segmentationNode.GetSegmentation()
+        if not segmentation:
+            return
+
+        self._ensureSegmentationReferenceImageGeometry(segmentationNode)
+        try:
+            segmentation.CreateRepresentation("Binary labelmap")
+        except Exception:
+            pass
+        try:
+            if hasattr(segmentation, "SetSourceRepresentationName"):
+                segmentation.SetSourceRepresentationName("Binary labelmap")
+            elif hasattr(segmentation, "SetMasterRepresentationName"):
+                segmentation.SetMasterRepresentationName("Binary labelmap")
+        except Exception:
+            # Keep non-fatal: this call should never block UI flow even if representation backends differ.
+            logging.debug("Could not force Binary labelmap source representation for '%s'.", segmentationNode.GetName())
 
     def mergeProbeInstances(
         self,
@@ -5393,6 +8125,7 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         )
 
         combinedSegmentation.CreateDefaultDisplayNodes()
+        self._ensureSegmentationReferenceImageGeometry(combinedSegmentation)
         self._clearSegmentationSegments(combinedSegmentation)
 
         for nodeIndex, translatedProbeNode in enumerate(validProbeNodes):
@@ -5413,6 +8146,10 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
 
         if combinedSegmentation.GetSegmentation().GetNumberOfSegments() == 0:
             raise RuntimeError("Unable to build combined ablation segmentation from generated probes.")
+
+        # Logical operators are labelmap-native; force edit-ready source up front to avoid
+        # interactive representation-conversion prompts and associated instability.
+        self.prepareSegmentationForEditing(combinedSegmentation)
 
         try:
             self._unionSegmentsWithLogicalOperators(combinedSegmentation)
@@ -5445,6 +8182,17 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         if not hasattr(slicer.modules, "fiducialregistration"):
             raise RuntimeError("fiducialregistration CLI module is not available.")
 
+        nativeCount = self._definedMarkupsPointCount(nativeFiducials)
+        registeredCount = self._definedMarkupsPointCount(registeredFiducials)
+        if nativeCount != registeredCount:
+            raise ValueError(
+                f"Native and registered fiducial counts must match. Found {nativeCount} native and {registeredCount} registered points."
+            )
+        if nativeCount < 3:
+            raise ValueError(
+                f"Rigid fiducial registration requires at least 3 points. Found {nativeCount}."
+            )
+
         transformNode = outputTransformNode
         if not transformNode or not slicer.mrmlScene.IsNodePresent(transformNode):
             transformNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTransformNode", "TumorRegistrationTransform")
@@ -5456,6 +8204,11 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             "transformType": "Rigid",
         }
         cliNode = slicer.cli.runSync(slicer.modules.fiducialregistration, None, registrationParameters)
+        if cliNode and hasattr(cliNode, "GetStatusString"):
+            statusText = str(cliNode.GetStatusString() or "")
+            if statusText and ("error" in statusText.lower()):
+                errorText = str(cliNode.GetErrorText() or "") if hasattr(cliNode, "GetErrorText") else ""
+                raise RuntimeError(errorText or f"Fiducial registration failed: {statusText}")
         if cliNode:
             slicer.mrmlScene.RemoveNode(cliNode)
 
@@ -5650,8 +8403,6 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         colorNode.SetAttribute(GENERATED_MARGIN_MODEL_ATTRIBUTE, "1")
         colorNode.SetTypeToUser()
         colorNode.SetNumberOfColors(3)
-        if hasattr(colorNode, "SetNamesInitialised"):
-            colorNode.SetNamesInitialised(True)
         colorNode.SetColor(0, "BelowHalfMAM", 0.84, 0.15, 0.16, 1.0)
         colorNode.SetColor(1, "BetweenHalfMAMAndMAM", 0.95, 0.55, 0.18, 1.0)
         colorNode.SetColor(2, "AtLeastMAM", 0.18, 0.62, 0.31, 1.0)
@@ -5784,21 +8535,19 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         if signedDistanceArray is None:
             signedDistanceArray = self.getSignedDistanceArray(marginModelNode)
 
-        signedMarginValues: list[float] = []
-        invalidValueCount = 0
-        for pointIndex in range(_data_array_value_count(signedDistanceArray)):
-            signedValue = float(signedDistanceArray.GetValue(pointIndex))
-            if math.isfinite(signedValue):
-                signedMarginValues.append(signedValue)
-            else:
-                invalidValueCount += 1
-
+        signedMarginValuesArray = np.asarray(
+            numpy_support.vtk_to_numpy(signedDistanceArray),
+            dtype=np.float64,
+        )
+        finiteMask = np.isfinite(signedMarginValuesArray)
+        invalidValueCount = int(np.count_nonzero(~finiteMask))
         if invalidValueCount > 0:
             logging.warning("Ignored %d non-finite signed-margin values during summary computation.", invalidValueCount)
 
-        if len(signedMarginValues) == 0:
+        finiteValues = signedMarginValuesArray[finiteMask]
+        if finiteValues.size <= 0:
             raise RuntimeError("Signed margin model contains no finite scalar values for summary computation.")
-        return signedMarginValues
+        return finiteValues.astype(float).tolist()
 
     def getWorkingSegmentInfo(self, segmentationNode: vtkMRMLSegmentationNode | None, operationName: str) -> tuple[str, str]:
         segmentID = self.getWorkingSegmentID(segmentationNode, operationName)
@@ -5821,6 +8570,8 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             [int(metric.get("TrajectoryIndex", 0)) for metric in trajectoryMetrics],
             integer=True,
         )
+        self._addStringColumn(tableNode, "Role", [str(metric.get("Role", "")) for metric in trajectoryMetrics])
+        self._addStringColumn(tableNode, "Source", [str(metric.get("Source", "")) for metric in trajectoryMetrics])
         self._addNumericColumn(tableNode, "Entry R (mm)", [float(metric.get("EntryR", 0.0)) for metric in trajectoryMetrics])
         self._addNumericColumn(tableNode, "Entry A (mm)", [float(metric.get("EntryA", 0.0)) for metric in trajectoryMetrics])
         self._addNumericColumn(tableNode, "Entry S (mm)", [float(metric.get("EntryS", 0.0)) for metric in trajectoryMetrics])
@@ -5831,6 +8582,12 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         self._addNumericColumn(tableNode, "Direction A", [float(metric.get("DirA", 0.0)) for metric in trajectoryMetrics])
         self._addNumericColumn(tableNode, "Direction S", [float(metric.get("DirS", 0.0)) for metric in trajectoryMetrics])
         self._addNumericColumn(tableNode, "Length (mm)", [float(metric.get("LengthMm", 0.0)) for metric in trajectoryMetrics])
+        self._addNumericColumn(tableNode, "Angle (deg)", [float(metric.get("AngleDeg", float("nan"))) for metric in trajectoryMetrics])
+        self._addNumericColumn(
+            tableNode,
+            "Radial Offset (mm)",
+            [float(metric.get("RadialOffsetMm", 0.0)) for metric in trajectoryMetrics],
+        )
 
     def populateMasterTrajectoryValidationTable(
         self,
@@ -5850,6 +8607,81 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             ["Yes" if bool(row.get("TrajectoryIntersects", False)) else "No" for row in orderedRows],
         )
         self._addNumericColumn(tableNode, "Min Distance (mm)", [float(row.get("MinDistanceMm", float("nan"))) for row in orderedRows])
+
+    def populateDerivedTrajectoryBundleSummaryTable(
+        self,
+        tableNode: vtkMRMLTableNode | None,
+        bundleRows: Sequence[dict[str, Any]],
+    ) -> None:
+        if not tableNode:
+            raise ValueError("Derived trajectory bundle summary table node is required.")
+
+        orderedRows = list(bundleRows)
+        tableNode.RemoveAllColumns()
+        self._addNumericColumn(
+            tableNode,
+            "Trajectory Index",
+            [int(row.get("TrajectoryIndex", 0)) for row in orderedRows],
+            integer=True,
+        )
+        self._addStringColumn(tableNode, "Role", [str(row.get("Role", "")) for row in orderedRows])
+        self._addStringColumn(tableNode, "Source", [str(row.get("Source", "")) for row in orderedRows])
+        self._addNumericColumn(tableNode, "Angle (deg)", [float(row.get("AngleDeg", float("nan"))) for row in orderedRows])
+        self._addNumericColumn(tableNode, "Radial Offset (mm)", [float(row.get("RadialOffsetMm", 0.0)) for row in orderedRows])
+        self._addStringColumn(tableNode, "Entry Point RAS", [str(row.get("EntryPointRAS", "")) for row in orderedRows])
+        self._addStringColumn(tableNode, "Target Point RAS", [str(row.get("TargetPointRAS", "")) for row in orderedRows])
+        self._addStringColumn(
+            tableNode,
+            "Intersects Critical Structures",
+            ["Yes" if bool(row.get("IntersectsCriticalStructures", False)) else "No" for row in orderedRows],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Min Distance To Critical Structures (mm)",
+            [float(row.get("MinDistanceToCriticalStructuresMm", float("nan"))) for row in orderedRows],
+        )
+
+    def populateCoaxialPlanTable(
+        self,
+        tableNode: vtkMRMLTableNode | None,
+        coaxialRows: Sequence[dict[str, Any]],
+    ) -> None:
+        if not tableNode:
+            raise ValueError("Coaxial plan table node is required.")
+
+        orderedRows = list(coaxialRows)
+        tableNode.RemoveAllColumns()
+        self._addNumericColumn(
+            tableNode,
+            "Trajectory Index",
+            [int(row.get("TrajectoryIndex", 0)) for row in orderedRows],
+            integer=True,
+        )
+        self._addStringColumn(tableNode, "Role", [str(row.get("Role", "")) for row in orderedRows])
+        self._addStringColumn(tableNode, "Source", [str(row.get("Source", "")) for row in orderedRows])
+        self._addStringColumn(tableNode, "Technique", [str(row.get("Technique", "")) for row in orderedRows])
+        self._addNumericColumn(
+            tableNode,
+            "Active Element (mm)",
+            [float(row.get("ActiveElementLengthMm", 0.0)) for row in orderedRows],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Spare (mm)",
+            [float(row.get("SpareMm", 0.0)) for row in orderedRows],
+        )
+        self._addNumericColumn(
+            tableNode,
+            "Push-Through Offset (mm)",
+            [float(row.get("PushThroughOffsetMm", 0.0)) for row in orderedRows],
+        )
+        self._addStringColumn(tableNode, "Entry Point RAS", [str(row.get("EntryPointRAS", "")) for row in orderedRows])
+        self._addStringColumn(tableNode, "Target Point RAS", [str(row.get("TargetPointRAS", "")) for row in orderedRows])
+        self._addStringColumn(
+            tableNode,
+            "Navigation Target RAS",
+            [str(row.get("NavigationTargetRAS", "")) for row in orderedRows],
+        )
 
     def populateKeyValueTable(self, tableNode: vtkMRMLTableNode | None, valuesByKey: dict[str, Any]) -> None:
         if not tableNode:
@@ -6634,11 +9466,15 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         sourcePolyData = self._requireModelPolyData(sourceModelNode, "Source")
         targetPolyData = self._requireModelPolyData(targetModelNode, "Target")
 
-        outputPolyData = vtk.vtkPolyData()
-        outputPolyData.DeepCopy(sourcePolyData)
+        distanceFilter = vtk.vtkDistancePolyDataFilter()
+        distanceFilter.SetInputData(0, sourcePolyData)
+        distanceFilter.SetInputData(1, targetPolyData)
+        distanceFilter.SignedDistanceOff()
+        distanceFilter.ComputeSecondDistanceOff()
+        distanceFilter.Update()
 
-        implicitDistance = vtk.vtkImplicitPolyDataDistance()
-        implicitDistance.SetInput(targetPolyData)
+        outputPolyData = vtk.vtkPolyData()
+        outputPolyData.DeepCopy(distanceFilter.GetOutput())
 
         enclosedFilter = vtk.vtkSelectEnclosedPoints()
         enclosedFilter.SetInputData(outputPolyData)
@@ -6647,20 +9483,44 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         enclosedFilter.CheckSurfaceOff()
         enclosedFilter.Update()
 
-        pointCount = outputPolyData.GetNumberOfPoints()
-        signedDistanceArray = vtk.vtkDoubleArray()
-        signedDistanceArray.SetName(SIGNED_DISTANCE_ARRAY_NAME)
-        signedDistanceArray.SetNumberOfComponents(1)
-        signedDistanceArray.SetNumberOfTuples(pointCount)
-
-        pointCoordinates = [0.0, 0.0, 0.0]
-        for pointIndex in range(pointCount):
-            outputPolyData.GetPoint(pointIndex, pointCoordinates)
-            unsignedDistance = abs(float(implicitDistance.EvaluateFunction(pointCoordinates)))
-            signedDistance = -unsignedDistance if bool(enclosedFilter.IsInside(pointIndex)) else unsignedDistance
-            signedDistanceArray.SetValue(pointIndex, signedDistance)
-
         pointData = outputPolyData.GetPointData()
+        distanceArray = pointData.GetArray("Distance")
+        insideMaskArray = enclosedFilter.GetOutput().GetPointData().GetArray("SelectedPoints")
+
+        signedDistanceArray = None
+        if (
+            distanceArray is not None
+            and insideMaskArray is not None
+            and _data_array_value_count(distanceArray) == outputPolyData.GetNumberOfPoints()
+            and _data_array_value_count(insideMaskArray) == outputPolyData.GetNumberOfPoints()
+        ):
+            unsignedDistances = np.abs(
+                np.asarray(numpy_support.vtk_to_numpy(distanceArray), dtype=np.float64)
+            )
+            insideMask = np.asarray(numpy_support.vtk_to_numpy(insideMaskArray), dtype=np.uint8) > 0
+            signedDistances = unsignedDistances.copy()
+            signedDistances[insideMask] *= -1.0
+            signedDistanceArray = numpy_support.numpy_to_vtk(
+                signedDistances,
+                deep=True,
+                array_type=vtk.VTK_DOUBLE,
+            )
+            signedDistanceArray.SetName(SIGNED_DISTANCE_ARRAY_NAME)
+        else:
+            implicitDistance = vtk.vtkImplicitPolyDataDistance()
+            implicitDistance.SetInput(targetPolyData)
+            pointCount = outputPolyData.GetNumberOfPoints()
+            signedDistanceArray = vtk.vtkDoubleArray()
+            signedDistanceArray.SetName(SIGNED_DISTANCE_ARRAY_NAME)
+            signedDistanceArray.SetNumberOfComponents(1)
+            signedDistanceArray.SetNumberOfTuples(pointCount)
+            pointCoordinates = [0.0, 0.0, 0.0]
+            for pointIndex in range(pointCount):
+                outputPolyData.GetPoint(pointIndex, pointCoordinates)
+                unsignedDistance = abs(float(implicitDistance.EvaluateFunction(pointCoordinates)))
+                signedDistance = -unsignedDistance if bool(enclosedFilter.IsInside(pointIndex)) else unsignedDistance
+                signedDistanceArray.SetValue(pointIndex, signedDistance)
+
         if pointData.GetArray(SIGNED_DISTANCE_ARRAY_NAME):
             pointData.RemoveArray(SIGNED_DISTANCE_ARRAY_NAME)
         pointData.AddArray(signedDistanceArray)
@@ -6711,7 +9571,10 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             return
 
         displayNode.SetVisibility(True)
-        displayNode.SetSliceIntersectionVisibility(True)
+        if hasattr(displayNode, "SetVisibility2D"):
+            displayNode.SetVisibility2D(True)
+        elif hasattr(displayNode, "SetSliceIntersectionVisibility"):
+            displayNode.SetSliceIntersectionVisibility(True)
         displayNode.SetSliceDisplayModeToIntersection()
         displayNode.SetSliceIntersectionThickness(2)
         displayNode.SetScalarVisibility(True)
@@ -6767,21 +9630,38 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         segmentation = segmentationNode.GetSegmentation()
         if segmentation.GetNumberOfSegments() <= 0:
             raise RuntimeError(f"Segmentation '{segmentationNode.GetName()}' has no segments.")
+        self._ensureSegmentationReferenceImageGeometry(segmentationNode)
         segmentation.CreateRepresentation("Closed surface")
 
-    def _cloneReferenceProbe(self, referenceProbeSegmentation: vtkMRMLSegmentationNode, trajectoryIndex: int) -> vtkMRMLSegmentationNode:
-        sourceSegmentID = self.getWorkingSegmentID(referenceProbeSegmentation, "reference probe placement")
-        sourceSurface = vtk.vtkPolyData()
-        referenceProbeSegmentation.GetClosedSurfaceRepresentation(sourceSegmentID, sourceSurface)
-        if sourceSurface.GetNumberOfPoints() <= 0:
+    def _cloneReferenceProbe(
+        self,
+        referenceProbeSegmentation: vtkMRMLSegmentationNode,
+        trajectoryIndex: int,
+        sourceSurface: vtk.vtkPolyData | None = None,
+    ) -> vtkMRMLSegmentationNode:
+        resolvedSourceSurface = sourceSurface
+        if resolvedSourceSurface is None:
+            sourceSegmentID = self.getWorkingSegmentID(referenceProbeSegmentation, "reference probe placement")
+            resolvedSourceSurface = vtk.vtkPolyData()
+            referenceProbeSegmentation.GetClosedSurfaceRepresentation(sourceSegmentID, resolvedSourceSurface)
+        if (
+            resolvedSourceSurface.GetNumberOfPoints() <= 0
+            or resolvedSourceSurface.GetNumberOfCells() <= 0
+            or not self._polyDataHasFinitePoints(resolvedSourceSurface)
+        ):
             raise RuntimeError("Reference probe segmentation has no usable closed-surface geometry.")
+
+        sourceSurfaceCopy = vtk.vtkPolyData()
+        sourceSurfaceCopy.DeepCopy(resolvedSourceSurface)
 
         clonedProbeNode = slicer.mrmlScene.AddNewNodeByClass(
             "vtkMRMLSegmentationNode",
             f"SV3D Placed Probe {trajectoryIndex + 1:02d}",
         )
         clonedProbeNode.CreateDefaultDisplayNodes()
-        clonedProbeNode.AddSegmentFromClosedSurfaceRepresentation(sourceSurface, f"Probe_{trajectoryIndex + 1:02d}", [0.2, 0.9, 0.3])
+        self._preferClosedSurfaceSourceRepresentation(clonedProbeNode)
+        self._ensureSegmentationReferenceImageGeometry(clonedProbeNode)
+        clonedProbeNode.AddSegmentFromClosedSurfaceRepresentation(sourceSurfaceCopy, f"Probe_{trajectoryIndex + 1:02d}", [0.2, 0.9, 0.3])
         clonedProbeNode.GetSegmentation().CreateRepresentation("Closed surface")
         clonedProbeNode.SetAttribute(GENERATED_PROBE_ATTRIBUTE, "1")
 
@@ -6816,6 +9696,7 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         if len(segmentIDs) <= 1:
             return
 
+        self.prepareSegmentationForEditing(segmentationNode)
         segmentEditorWidget = slicer.qMRMLSegmentEditorWidget()
         segmentEditorWidget.setMRMLScene(slicer.mrmlScene)
         segmentEditorNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentEditorNode")
@@ -6829,14 +9710,33 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             if effect is None:
                 raise RuntimeError("Logical operators effect is unavailable.")
 
+            appliedModifierSegmentIDs: list[str] = []
             for modifierSegmentID in segmentIDs[1:]:
+                if not segmentationNode.GetSegmentation().GetSegment(modifierSegmentID):
+                    continue
                 effect.self().scriptedEffect.setParameter("Operation", "UNION")
                 effect.self().scriptedEffect.setParameter("ModifierSegmentID", modifierSegmentID)
                 effect.self().onApply()
-                segmentationNode.GetSegmentation().RemoveSegment(modifierSegmentID)
+                appliedModifierSegmentIDs.append(modifierSegmentID)
+
+            # Clear editor references before mutating/removing modifier segments.
+            try:
+                segmentEditorWidget.setActiveEffectByName("")
+            except Exception:
+                pass
+            try:
+                segmentEditorWidget.setSegmentationNode(None)
+                segmentEditorWidget.setMRMLSegmentEditorNode(None)
+            except Exception:
+                pass
+
+            for modifierSegmentID in appliedModifierSegmentIDs:
+                if segmentationNode.GetSegmentation().GetSegment(modifierSegmentID):
+                    segmentationNode.GetSegmentation().RemoveSegment(modifierSegmentID)
         finally:
             segmentEditorWidget = None
-            slicer.mrmlScene.RemoveNode(segmentEditorNode)
+            if segmentEditorNode and slicer.mrmlScene.IsNodePresent(segmentEditorNode):
+                slicer.mrmlScene.RemoveNode(segmentEditorNode)
 
     def _mergeSegmentsByAppendingSurfaces(self, segmentationNode: vtkMRMLSegmentationNode) -> None:
         self._ensureSegmentationHasClosedSurface(segmentationNode)
@@ -6880,6 +9780,9 @@ class SurgicalVision3D_PlannerTest(ScriptedLoadableModuleTest):
         self.test_extract_trajectories_from_paired_points()
         self.test_extract_trajectories_odd_count_handling()
         self.test_extract_single_master_trajectory_from_markups()
+        self.test_orthogonal_array_basis_is_deterministic_and_orthonormal()
+        self.test_generate_derived_trajectory_array_spacing_and_parallelism()
+        self.test_generate_derived_trajectory_array_include_master_toggle()
         self.test_geometry_catalog_loading()
         self.test_mam_assessment_summary()
         self.test_compute_coaxial_plan_pushthrough_offset()
@@ -6903,22 +9806,25 @@ class SurgicalVision3D_PlannerTest(ScriptedLoadableModuleTest):
 
     def test_extract_trajectories_from_paired_points(self):
         points = [
-            (0.0, 0.0, 0.0),
             (0.0, 0.0, -10.0),
-            (5.0, 1.0, 0.0),
+            (0.0, 0.0, 0.0),
             (5.0, 1.0, -4.0),
+            (5.0, 1.0, 0.0),
         ]
         trajectories = SurgicalVision3D_PlannerLogic.extractTrajectoriesFromPointPairs(points, strictEven=True)
 
         self.assertEqual(len(trajectories), 2)
         self.assertEqual(trajectories[0].sourceControlPointIndices, (0, 1))
+        self.assertTrue(np.allclose(np.array(trajectories[0].entryPointRAS), np.array([0.0, 0.0, 0.0]), atol=1e-6))
+        self.assertTrue(np.allclose(np.array(trajectories[0].targetPointRAS), np.array([0.0, 0.0, -10.0]), atol=1e-6))
+        self.assertTrue(np.allclose(np.array(trajectories[0].directionVector), np.array([0.0, 0.0, -1.0]), atol=1e-6))
         self.assertAlmostEqual(trajectories[0].lengthMm, 10.0, places=6)
         self.assertAlmostEqual(trajectories[1].lengthMm, 4.0, places=6)
 
     def test_extract_trajectories_odd_count_handling(self):
         oddPoints = [
-            (0.0, 0.0, 0.0),
             (0.0, 0.0, -10.0),
+            (0.0, 0.0, 0.0),
             (2.0, 2.0, 2.0),
         ]
         with self.assertRaises(ValueError):
@@ -6932,18 +9838,119 @@ class SurgicalVision3D_PlannerTest(ScriptedLoadableModuleTest):
         endpointsNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "endpoints")
         slicer.util.updateMarkupsControlPointsFromArray(
             endpointsNode,
-            np.array([(0.0, 0.0, 0.0), (0.0, 0.0, -15.0)], dtype=float),
+            np.array([(0.0, 0.0, -15.0), (0.0, 0.0, 0.0)], dtype=float),
         )
 
         trajectory = logic.extractSingleTrajectoryFromMarkups(endpointsNode)
         self.assertAlmostEqual(float(trajectory.lengthMm), 15.0, places=6)
+        self.assertTrue(np.allclose(np.array(trajectory.entryPointRAS), np.array([0.0, 0.0, 0.0]), atol=1e-6))
+        self.assertTrue(np.allclose(np.array(trajectory.targetPointRAS), np.array([0.0, 0.0, -15.0]), atol=1e-6))
 
         slicer.util.updateMarkupsControlPointsFromArray(
             endpointsNode,
-            np.array([(0.0, 0.0, 0.0), (0.0, 0.0, -15.0), (5.0, 0.0, 0.0), (5.0, 0.0, -5.0)], dtype=float),
+            np.array([(0.0, 0.0, -15.0), (0.0, 0.0, 0.0), (5.0, 0.0, -5.0), (5.0, 0.0, 0.0)], dtype=float),
         )
         with self.assertRaises(ValueError):
             logic.extractSingleTrajectoryFromMarkups(endpointsNode)
+
+    def test_orthogonal_array_basis_is_deterministic_and_orthonormal(self):
+        logic = SurgicalVision3D_PlannerLogic()
+        direction = np.array([0.2, -0.3, -0.93], dtype=float)
+        direction = direction / np.linalg.norm(direction)
+        basisU1, basisV1 = logic.createOrthogonalArrayBasis(direction)
+        basisU2, basisV2 = logic.createOrthogonalArrayBasis(direction)
+
+        self.assertTrue(np.allclose(basisU1, basisU2, atol=1e-6))
+        self.assertTrue(np.allclose(basisV1, basisV2, atol=1e-6))
+        self.assertAlmostEqual(float(np.dot(basisU1, direction)), 0.0, places=6)
+        self.assertAlmostEqual(float(np.dot(basisV1, direction)), 0.0, places=6)
+        self.assertAlmostEqual(float(np.dot(basisU1, basisV1)), 0.0, places=6)
+        self.assertAlmostEqual(float(np.linalg.norm(basisU1)), 1.0, places=6)
+        self.assertAlmostEqual(float(np.linalg.norm(basisV1)), 1.0, places=6)
+
+    def test_generate_derived_trajectory_array_spacing_and_parallelism(self):
+        logic = SurgicalVision3D_PlannerLogic()
+        master = ProbeTrajectory(
+            entryPointRAS=(10.0, 20.0, 30.0),
+            targetPointRAS=(12.0, 23.0, 10.0),
+            directionVector=tuple((_normalize_vector((2.0, 3.0, -20.0))).tolist()),
+            lengthMm=float(np.linalg.norm(np.array([2.0, 3.0, -20.0], dtype=float))),
+            trajectoryIndex=0,
+            role="Master",
+        )
+        derivedCount = 6
+        radiusMm = 10.0
+        bundle = logic.generateDerivedParallelTrajectories(
+            master,
+            derivedCount=derivedCount,
+            radiusMm=radiusMm,
+            angleOffsetDeg=0.0,
+            includeMaster=True,
+        )
+
+        self.assertEqual(len(bundle), 7)
+        derivedTrajectories = [trajectory for trajectory in bundle if trajectory.derivedFromMaster]
+        self.assertEqual(len(derivedTrajectories), 6)
+
+        angleValues = sorted(float(trajectory.angleDeg or 0.0) for trajectory in derivedTrajectories)
+        spacingValues = []
+        for index in range(len(angleValues)):
+            currentAngle = angleValues[index]
+            nextAngle = angleValues[(index + 1) % len(angleValues)]
+            delta = (nextAngle - currentAngle) % 360.0
+            spacingValues.append(delta)
+        for spacing in spacingValues:
+            self.assertAlmostEqual(float(spacing), 60.0, places=4)
+
+        masterDirection = _normalize_vector(master.directionVector)
+        masterEntry = np.asarray(master.entryPointRAS, dtype=float)
+        masterTarget = np.asarray(master.targetPointRAS, dtype=float)
+        for derivedTrajectory in derivedTrajectories:
+            derivedDirection = _normalize_vector(derivedTrajectory.directionVector)
+            self.assertTrue(np.allclose(derivedDirection, masterDirection, atol=1e-6))
+            self.assertAlmostEqual(float(derivedTrajectory.lengthMm), float(master.lengthMm), places=6)
+            offsetEntry = np.asarray(derivedTrajectory.entryPointRAS, dtype=float) - masterEntry
+            offsetTarget = np.asarray(derivedTrajectory.targetPointRAS, dtype=float) - masterTarget
+            self.assertTrue(np.allclose(offsetEntry, offsetTarget, atol=1e-6))
+            self.assertAlmostEqual(float(np.linalg.norm(offsetEntry)), radiusMm, places=4)
+
+        bundle4 = logic.generateDerivedParallelTrajectories(
+            master,
+            derivedCount=4,
+            radiusMm=radiusMm,
+            angleOffsetDeg=0.0,
+            includeMaster=True,
+        )
+        cardinalRoles = [trajectory.role for trajectory in bundle4 if trajectory.derivedFromMaster]
+        self.assertEqual(cardinalRoles, ["North", "East", "South", "West"])
+
+    def test_generate_derived_trajectory_array_include_master_toggle(self):
+        logic = SurgicalVision3D_PlannerLogic()
+        master = ProbeTrajectory(
+            entryPointRAS=(0.0, 0.0, 0.0),
+            targetPointRAS=(0.0, 0.0, -20.0),
+            directionVector=(0.0, 0.0, -1.0),
+            lengthMm=20.0,
+            trajectoryIndex=0,
+            role="Master",
+        )
+        withMaster = logic.generateDerivedParallelTrajectories(
+            master,
+            derivedCount=4,
+            radiusMm=8.0,
+            includeMaster=True,
+        )
+        withoutMaster = logic.generateDerivedParallelTrajectories(
+            master,
+            derivedCount=4,
+            radiusMm=8.0,
+            includeMaster=False,
+        )
+
+        self.assertEqual(len(withMaster), 5)
+        self.assertEqual(len(withoutMaster), 4)
+        self.assertEqual(withMaster[0].role, "Master")
+        self.assertTrue(all(trajectory.derivedFromMaster for trajectory in withoutMaster))
 
     def test_geometry_catalog_loading(self):
         geometryEntries = SurgicalVision3D_PlannerLogic().loadGeometryCatalog()
@@ -6971,9 +9978,10 @@ class SurgicalVision3D_PlannerTest(ScriptedLoadableModuleTest):
             trajectory,
             "PushThrough",
             10.0,
+            5.0,
         )
         self.assertEqual(coaxialSummary.technique, "PushThrough")
-        self.assertTrue(np.allclose(np.array(coaxialSummary.navigationTargetRAS), np.array([0.0, 0.0, -10.0]), atol=1e-6))
+        self.assertTrue(np.allclose(np.array(coaxialSummary.navigationTargetRAS), np.array([0.0, 0.0, -5.0]), atol=1e-6))
 
     def test_recolor_and_restore_include_last_array_value(self):
         signedDistances = vtk.vtkDoubleArray()
@@ -7002,6 +10010,13 @@ class SurgicalVision3D_PlannerTest(ScriptedLoadableModuleTest):
         parameterNode = logic.getParameterNode()
 
         self.assertTrue(parameterNode.createTrajectoryLinesOnPlacement)
+        self.assertTrue(parameterNode.placeMultipleControlPoints)
+        self.assertEqual(str(parameterNode.trajectoryPlanningMode), "Single")
+        self.assertEqual(int(parameterNode.derivedTrajectoryCount), 4)
+        self.assertAlmostEqual(float(parameterNode.derivedTrajectoryRadiusMm), 10.0, places=6)
+        self.assertAlmostEqual(float(parameterNode.derivedTrajectoryAngleOffsetDeg), 0.0, places=6)
+        self.assertTrue(bool(parameterNode.includeMasterTrajectoryInArray))
+        self.assertAlmostEqual(float(parameterNode.coaxialSpareMm), 5.0, places=6)
         self.assertEqual(SurgicalVision3D_PlannerLogic.deserializeNodeIDs(parameterNode.generatedProbeNodeIDs), [])
 
         probeSegmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")

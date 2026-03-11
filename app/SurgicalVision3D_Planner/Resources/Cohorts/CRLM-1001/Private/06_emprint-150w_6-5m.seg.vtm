@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<VTKFile type="vtkMultiBlockDataSet" version="1.0" byte_order="LittleEndian" header_type="UInt32" compressor="vtkZLibDataCompressor">
+  <vtkMultiBlockDataSet>
+    <DataSet index="0" file="06_emprint-150w_6-5m.seg/06_emprint-150w_6-5m.seg_0.vtp"/>
+  </vtkMultiBlockDataSet>
+</VTKFile>

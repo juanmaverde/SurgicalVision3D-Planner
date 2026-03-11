@@ -31,7 +31,7 @@ The beginner flow is linear:
 1. `Import Case`
 2. `Segment Structures`
 3. `Define Master Trajectory`
-4. `Validate Trajectory`
+4. `Validate Trajectory + Endpoint Rescue`
 5. `Single Applicator Plan`
 6. `Lock + Coaxial Plan`
 
@@ -41,6 +41,11 @@ Key beginner behaviors:
 - use **Segment Editor** for tumor and critical-structure segmentation
 - enforce exactly **one** entry point and **one** applicator endpoint
 - validate the trajectory against segmented critical structures
+- if validation fails, run deterministic **Auto-adjust Endpoint** (Step 4 rescue):
+  - moves endpoint only (entry fixed)
+  - keeps trajectory length fixed
+  - endpoint must remain inside tumor
+  - search cap is `15 mm`; no movement is applied unless a zero-intersection candidate is found
 - choose one predefined ablation geometry from a dropdown backed by `Resources/geometry_catalog.json`
 - predefined geometries currently use `30 mm` active-element lengths in the catalog and can be refined later by editing that JSON file
 - evaluate coverage using **Minimal Ablative Margin (MAM)** with default `10 mm`
@@ -50,21 +55,23 @@ Key beginner behaviors:
   - green: `>= MAM`
 - lock the validated master plan before deriving coaxial guidance
 - compute coaxial guidance for `PullBack` or `PushThrough`
+- for `PushThrough`, the coaxial target offset is computed from endpoint as:
+  - `activeElementLengthMm + coaxialSpareMm`
+  - default spare is `5 mm` (editable in Step 6)
 
 Deferred features in this branch:
 
 - multi-applicator planning
-- automatic endpoint adaptation / optimization
 - cohort, reproducibility, export, and git dashboard workflows in the visible beginner path
 
 Quick start in beginner mode:
 
 1. Import a case folder or load a bundled sample case.
 2. Open Segment Editor and confirm tumor plus critical structures.
-3. Create exactly two trajectory points: entry first, applicator endpoint second.
-4. Validate the trajectory against critical structures.
+3. Create exactly two trajectory points: applicator endpoint first, entry point second.
+4. Validate the trajectory against critical structures. If it fails, click `Auto-adjust Endpoint` to run the conservative 15 mm rescue search.
 5. Select geometry, place the applicator, create the ablation volume, and run `Evaluate MAM`.
-6. If MAM passes, lock the master plan and compute the coaxial plan.
+6. If MAM passes, lock the master plan, set `Spare (mm)` if needed (default `5`), and compute the coaxial plan.
 
 ## 2. Terminology (Non-Expert + Technical)
 
@@ -76,11 +83,11 @@ Use this glossary when reading the UI and outputs.
 | Segment | One labeled structure inside a segmentation. | A segmentation entry identified by a segment ID and name. |
 | Tumor segmentation | The structure you want to treat. | The target segmentation node used for margin and coverage-related computations. |
 | Risk structures segmentation | Nearby structures you want to avoid. | Optional segmentation node containing one or more structures-at-risk for distance checks. |
-| Markups endpoint node | A list of points that define trajectories. | A `vtkMRMLMarkupsFiducialNode` whose control points are parsed in entry/target pairs. |
+| Markups endpoint node | A list of points that define trajectories. | A `vtkMRMLMarkupsFiducialNode` whose control points are parsed in endpoint/entry pairs. |
 | Control point | A single planned point you place manually. | A fiducial point in markups with index and RAS coordinates. |
-| Entry point | Where a probe enters tissue. | First point of each pair. |
-| Target point | Where a probe aims inside/near the target. | Second point of each pair. |
-| Trajectory | One planned path from entry to target. | Vector/path derived from one entry-target pair. |
+| Entry point | Where a probe enters tissue. | Second point of each pair. |
+| Target point | Where a probe aims inside/near the target. | First point of each pair (applicator endpoint). |
+| Trajectory | One planned path from entry to target. | Vector/path derived from one endpoint-entry pair (endpoint first in markups). |
 | Trajectory line | A visible line for a trajectory. | Generated `vtkMRMLMarkupsLineNode` owned by the module. |
 | Combined ablation zone | The union of all placed probe zones. | `SV3D Combined Ablation Zone` segmentation created from generated instances. |
 | Registration | Aligning structures from one space to another. | Rigid transform computed from native and registered fiducials. |
@@ -106,7 +113,7 @@ Use this glossary when reading the UI and outputs.
 Required inputs:
 
 - reference probe/applicator segmentation
-- endpoint markups (entry/target pairs)
+- endpoint markups (endpoint/entry pairs)
 - tumor segmentation
 
 Optional inputs:
@@ -152,15 +159,15 @@ Simple example:
 
 How to enter points:
 
-- point 1 = entry for trajectory 1
-- point 2 = target for trajectory 1
-- point 3 = entry for trajectory 2
-- point 4 = target for trajectory 2
+- point 1 = applicator endpoint for trajectory 1
+- point 2 = entry for trajectory 1
+- point 3 = applicator endpoint for trajectory 2
+- point 4 = entry for trajectory 2
 
 Do not:
 
 - leave odd number of points
-- swap entry/target order for some pairs
+- swap endpoint/entry order for some pairs
 
 ### 4.3 Tumor segmentation
 
@@ -189,7 +196,7 @@ If missing:
 In **Inputs**:
 
 1. Select `Probe segmentation` (source template).
-2. Select `Trajectory endpoint markups` (entry/target pairs).
+2. Select `Trajectory endpoint markups` (endpoint/entry pairs).
 3. Optionally enable:
    - `Create trajectory lines on placement`
    - `Clear previous generated probes`
@@ -334,7 +341,7 @@ Check:
 Check:
 
 - source probe template orientation (expected local negative Z forward)
-- entry/target ordering in markups
+- endpoint/entry ordering in markups
 - coordinate consistency of markups and segmentations
 
 ### Cohort run fails

@@ -18,8 +18,11 @@ class SurgicalVision3D_PlannerPhase1Test(ScriptedLoadableModuleTest):
     def runTest(self):
         self.setUp()
         self.test_rotation_matrix_covers_parallel_cases()
+        self.test_normalize_vector_rejects_non_finite_inputs()
         self.test_trajectory_extraction_and_odd_point_handling()
+        self.test_trajectory_extraction_rejects_non_finite_points()
         self.test_trajectory_metrics_from_known_point_pairs()
+        self.test_trajectory_geometry_validation_for_placement()
         self.test_signed_margin_summary_metrics_from_synthetic_values()
         self.test_margin_threshold_summary_metrics()
         self.test_phase2a_metrics_handle_empty_or_invalid_values()
@@ -38,6 +41,10 @@ class SurgicalVision3D_PlannerPhase1Test(ScriptedLoadableModuleTest):
         self.test_probe_coordination_pairwise_metrics()
         self.test_probe_coordination_plan_aggregation_and_gate_flags()
         self.test_no_touch_entry_outside_tumor_rule()
+        self.test_auto_adjust_endpoint_finds_safe_adjustment()
+        self.test_auto_adjust_endpoint_no_solution_within_cap()
+        self.test_auto_adjust_endpoint_is_deterministic()
+        self.test_auto_adjust_endpoint_precondition_guards()
         self.test_probe_coordination_tables_are_reused_deterministically()
         self.test_export_manifest_creation_from_synthetic_state()
         self.test_export_bundle_path_generation()
@@ -67,12 +74,18 @@ class SurgicalVision3D_PlannerPhase1Test(ScriptedLoadableModuleTest):
         sphereSource.Update()
         return sphereSource.GetOutput()
 
-    def _createSphereSegmentation(self, nodeName: str, center=(0.0, 0.0, 0.0)) -> slicer.vtkMRMLSegmentationNode:
-        spherePolyData = self._createSpherePolyData(center=center)
+    def _createSphereSegmentation(
+        self,
+        nodeName: str,
+        center=(0.0, 0.0, 0.0),
+        radius=3.0,
+        segmentName="Segment_1",
+    ) -> slicer.vtkMRMLSegmentationNode:
+        spherePolyData = self._createSpherePolyData(center=center, radius=radius)
 
         segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", nodeName)
         segmentationNode.CreateDefaultDisplayNodes()
-        segmentationNode.AddSegmentFromClosedSurfaceRepresentation(spherePolyData, "Segment_1", [1.0, 0.3, 0.2])
+        segmentationNode.AddSegmentFromClosedSurfaceRepresentation(spherePolyData, str(segmentName), [1.0, 0.3, 0.2])
         segmentationNode.GetSegmentation().CreateRepresentation("Closed surface")
         return segmentationNode
 
@@ -87,6 +100,12 @@ class SurgicalVision3D_PlannerPhase1Test(ScriptedLoadableModuleTest):
 
         orthogonal = planner.rotation_matrix_from_vectors(source, [0.0, 1.0, 0.0]).dot(source)
         self.assertTrue(np.allclose(orthogonal, [0.0, 1.0, 0.0], atol=1e-6))
+
+    def test_normalize_vector_rejects_non_finite_inputs(self):
+        with self.assertRaises(ValueError):
+            planner._normalize_vector((np.nan, 0.0, 1.0))
+        with self.assertRaises(ValueError):
+            planner._normalize_vector((1.0, 2.0))
 
     def test_trajectory_extraction_and_odd_point_handling(self):
         trajectories = planner.SurgicalVision3D_PlannerLogic.extractTrajectoriesFromPointPairs(
@@ -113,6 +132,33 @@ class SurgicalVision3D_PlannerPhase1Test(ScriptedLoadableModuleTest):
             strictEven=False,
         )
         self.assertEqual(len(safeTrajectories), 1)
+
+    def test_trajectory_extraction_rejects_non_finite_points(self):
+        with self.assertRaises(ValueError):
+            planner.SurgicalVision3D_PlannerLogic.extractTrajectoriesFromPointPairs(
+                [(0.0, 0.0, 0.0), (np.nan, 0.0, -10.0)],
+                strictEven=True,
+            )
+
+    def test_trajectory_geometry_validation_for_placement(self):
+        validTrajectory = planner.ProbeTrajectory(
+            entryPointRAS=(0.0, 0.0, 0.0),
+            targetPointRAS=(0.0, 0.0, -10.0),
+            directionVector=(0.0, 0.0, -1.0),
+            lengthMm=10.0,
+            trajectoryIndex=0,
+        )
+        planner.SurgicalVision3D_PlannerLogic._validateTrajectoryGeometryForPlacement(validTrajectory)
+
+        invalidTrajectory = planner.ProbeTrajectory(
+            entryPointRAS=(0.0, 0.0, 0.0),
+            targetPointRAS=(0.0, 0.0, -10.0),
+            directionVector=(np.nan, 0.0, -1.0),
+            lengthMm=10.0,
+            trajectoryIndex=1,
+        )
+        with self.assertRaises(ValueError):
+            planner.SurgicalVision3D_PlannerLogic._validateTrajectoryGeometryForPlacement(invalidTrajectory)
 
     def test_trajectory_metrics_from_known_point_pairs(self):
         logic = planner.SurgicalVision3D_PlannerLogic()
@@ -339,6 +385,18 @@ class SurgicalVision3D_PlannerPhase1Test(ScriptedLoadableModuleTest):
         self.assertEqual(combined2.GetName(), planner.COMBINED_PROBE_NODE_NAME)
         self.assertEqual(combined2.GetAttribute(planner.GENERATED_COMBINED_PROBE_ATTRIBUTE), "1")
         self.assertEqual(combined2.GetSegmentation().GetNumberOfSegments(), 1)
+        segmentation = combined2.GetSegmentation()
+        sourceRepresentationName = ""
+        if hasattr(segmentation, "GetSourceRepresentationName"):
+            sourceRepresentationName = str(segmentation.GetSourceRepresentationName() or "")
+        elif hasattr(segmentation, "GetMasterRepresentationName"):
+            sourceRepresentationName = str(segmentation.GetMasterRepresentationName() or "")
+        self.assertEqual(sourceRepresentationName, "Binary labelmap")
+
+        segmentID = segmentation.GetNthSegmentID(0)
+        combinedSurface = vtk.vtkPolyData()
+        combined2.GetClosedSurfaceRepresentation(segmentID, combinedSurface)
+        self.assertGreater(combinedSurface.GetNumberOfPoints(), 0)
 
     def test_summary_table_outputs_are_reused_deterministically(self):
         logic = planner.SurgicalVision3D_PlannerLogic()
@@ -576,6 +634,176 @@ class SurgicalVision3D_PlannerPhase1Test(ScriptedLoadableModuleTest):
         self.assertFalse(bool(planSummary["NoTouchPass"]))
         self.assertFalse(bool(planSummary["CoordinationGatePass"]))
         self.assertIn("NoTouchCheckFailed", str(planSummary["CoordinationFailureSummary"]))
+
+    def test_auto_adjust_endpoint_finds_safe_adjustment(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        tumorSegmentation = self._createSphereSegmentation(
+            "AutoAdjustTumor",
+            center=(0.0, 0.0, 0.0),
+            radius=20.0,
+            segmentName="Tumor",
+        )
+        criticalSegmentation = self._createSphereSegmentation(
+            "AutoAdjustCritical",
+            center=(0.0, 0.0, 12.0),
+            radius=4.0,
+            segmentName="Vessel",
+        )
+        trajectory = planner.SurgicalVision3D_PlannerLogic.extractTrajectoriesFromPointPairs(
+            [(0.0, 0.0, 0.0), (0.0, 0.0, 30.0)],
+            strictEven=True,
+        )[0]
+
+        _, initialSummary = logic.evaluateMasterTrajectoryAgainstCriticalStructures(
+            trajectory,
+            criticalSegmentation,
+            tumorSegmentation,
+        )
+        self.assertFalse(bool(initialSummary["TrajectoryPass"]))
+
+        adjustResult = logic.autoAdjustMasterTrajectoryEndpoint(
+            trajectory,
+            criticalSegmentation,
+            tumorSegmentation,
+        )
+        self.assertTrue(bool(adjustResult.applied))
+        self.assertIsNotNone(adjustResult.selectedTargetPointRAS)
+        self.assertLessEqual(float(adjustResult.selectedEndpointShiftMm), 15.0 + 1e-6)
+
+        entryPoint = np.array(trajectory.entryPointRAS, dtype=float)
+        adjustedTarget = np.array(adjustResult.selectedTargetPointRAS, dtype=float)
+        adjustedDirection = adjustedTarget - entryPoint
+        adjustedLength = float(np.linalg.norm(adjustedDirection))
+        self.assertTrue(np.allclose(np.array(trajectory.entryPointRAS, dtype=float), entryPoint, atol=1e-6))
+        self.assertAlmostEqual(adjustedLength, float(trajectory.lengthMm), places=4)
+
+        tumorSegmentID = logic.findPreferredSegmentID(
+            tumorSegmentation,
+            planner.DEFAULT_TUMOR_SEGMENT_NAMES,
+            "auto-adjust endpoint test",
+            fallbackToFirst=True,
+        )
+        tumorSurface = vtk.vtkPolyData()
+        tumorSegmentation.GetClosedSurfaceRepresentation(tumorSegmentID, tumorSurface)
+        preparedTumorSurface = logic._prepareClosedSurfaceForTrajectoryValidation(tumorSurface)
+        self.assertIsNotNone(preparedTumorSurface)
+        self.assertTrue(logic._isPointInsideClosedSurface(adjustedTarget, preparedTumorSurface))
+
+        adjustedTrajectory = planner.ProbeTrajectory(
+            entryPointRAS=tuple(float(value) for value in entryPoint.tolist()),
+            targetPointRAS=tuple(float(value) for value in adjustedTarget.tolist()),
+            directionVector=tuple(float(value) for value in (adjustedDirection / adjustedLength).tolist()),
+            lengthMm=float(adjustedLength),
+            trajectoryIndex=0,
+        )
+        _, adjustedSummary = logic.evaluateMasterTrajectoryAgainstCriticalStructures(
+            adjustedTrajectory,
+            criticalSegmentation,
+            tumorSegmentation,
+        )
+        self.assertTrue(bool(adjustedSummary["TrajectoryPass"]))
+        self.assertEqual(int(adjustedSummary["IntersectedStructureCount"]), 0)
+
+    def test_auto_adjust_endpoint_no_solution_within_cap(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        tumorSegmentation = self._createSphereSegmentation(
+            "AutoAdjustNoSolutionTumor",
+            center=(0.0, 0.0, 0.0),
+            radius=20.0,
+            segmentName="Tumor",
+        )
+        criticalSegmentation = self._createSphereSegmentation(
+            "AutoAdjustNoSolutionCritical",
+            center=(0.0, 0.0, 30.0),
+            radius=6.0,
+            segmentName="EntryHazard",
+        )
+        trajectory = planner.SurgicalVision3D_PlannerLogic.extractTrajectoriesFromPointPairs(
+            [(0.0, 0.0, 0.0), (0.0, 0.0, 30.0)],
+            strictEven=True,
+        )[0]
+
+        adjustResult = logic.autoAdjustMasterTrajectoryEndpoint(
+            trajectory,
+            criticalSegmentation,
+            tumorSegmentation,
+        )
+        self.assertFalse(bool(adjustResult.applied))
+        self.assertEqual(str(adjustResult.reason), "NoZeroIntersectionCandidateWithinCap")
+        self.assertIsNotNone(adjustResult.selectedTargetPointRAS)
+        self.assertTrue(
+            np.allclose(
+                np.array(adjustResult.selectedTargetPointRAS, dtype=float),
+                np.array(trajectory.targetPointRAS, dtype=float),
+                atol=1e-6,
+            )
+        )
+
+    def test_auto_adjust_endpoint_is_deterministic(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        tumorSegmentation = self._createSphereSegmentation(
+            "AutoAdjustDeterminismTumor",
+            center=(0.0, 0.0, 0.0),
+            radius=20.0,
+            segmentName="Tumor",
+        )
+        criticalSegmentation = self._createSphereSegmentation(
+            "AutoAdjustDeterminismCritical",
+            center=(0.0, 0.0, 12.0),
+            radius=4.0,
+            segmentName="Vessel",
+        )
+        trajectory = planner.SurgicalVision3D_PlannerLogic.extractTrajectoriesFromPointPairs(
+            [(0.0, 0.0, 0.0), (0.0, 0.0, 30.0)],
+            strictEven=True,
+        )[0]
+
+        resultA = logic.autoAdjustMasterTrajectoryEndpoint(
+            trajectory,
+            criticalSegmentation,
+            tumorSegmentation,
+        )
+        resultB = logic.autoAdjustMasterTrajectoryEndpoint(
+            trajectory,
+            criticalSegmentation,
+            tumorSegmentation,
+        )
+
+        self.assertEqual(bool(resultA.applied), bool(resultB.applied))
+        self.assertEqual(int(resultA.selectedShellIndex), int(resultB.selectedShellIndex))
+        self.assertEqual(int(resultA.selectedAzimuthIndex), int(resultB.selectedAzimuthIndex))
+        self.assertAlmostEqual(float(resultA.selectedEndpointShiftMm), float(resultB.selectedEndpointShiftMm), places=6)
+        self.assertTrue(
+            np.allclose(
+                np.array(resultA.selectedTargetPointRAS, dtype=float),
+                np.array(resultB.selectedTargetPointRAS, dtype=float),
+                atol=1e-6,
+            )
+        )
+
+    def test_auto_adjust_endpoint_precondition_guards(self):
+        logic = planner.SurgicalVision3D_PlannerLogic()
+        tumorSegmentation = self._createSphereSegmentation(
+            "AutoAdjustGuardTumor",
+            center=(0.0, 0.0, 0.0),
+            radius=20.0,
+            segmentName="Tumor",
+        )
+        criticalSegmentation = self._createSphereSegmentation(
+            "AutoAdjustGuardCritical",
+            center=(0.0, 0.0, 12.0),
+            radius=4.0,
+            segmentName="Vessel",
+        )
+        trajectory = planner.SurgicalVision3D_PlannerLogic.extractTrajectoriesFromPointPairs(
+            [(0.0, 0.0, 0.0), (0.0, 0.0, 30.0)],
+            strictEven=True,
+        )[0]
+
+        with self.assertRaisesRegex(ValueError, "Tumor segmentation is required"):
+            logic.autoAdjustMasterTrajectoryEndpoint(trajectory, criticalSegmentation, None)
+        with self.assertRaisesRegex(ValueError, "Critical-structures segmentation is required"):
+            logic.autoAdjustMasterTrajectoryEndpoint(trajectory, None, tumorSegmentation)
 
     def test_probe_coordination_tables_are_reused_deterministically(self):
         logic = planner.SurgicalVision3D_PlannerLogic()

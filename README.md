@@ -34,6 +34,7 @@ At a high level, the module supports:
 - Prerequisites: `app/SurgicalVision3D_Planner/PREREQUISITES.md`
 - Phase notes: `app/SurgicalVision3D_Planner/PHASE1_REFACTOR_NOTES.md`
 - End-user guide: `app/SurgicalVision3D_Planner/USAGE_GUIDE.md`
+- Beginner quick guide: `app/SurgicalVision3D_Planner/BEGINNER_STEP_BY_STEP.md`
 
 ## Quick Start (First Run in 3D Slicer)
 

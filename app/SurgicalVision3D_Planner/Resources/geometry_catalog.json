@@ -46,5 +46,41 @@
     "label": "Emprint 150W / 10 min",
     "templateFile": "Resources/geometries/08_emprint-150w_10m.stl",
     "activeElementLengthMm": 30.0
+  },
+  {
+    "id": "cooltip_single_2cm_ic_exvivo",
+    "label": "Cool-tip single 2 cm tip (IC, ex vivo)",
+    "templateFile": "Resources/geometries/09_cooltip-single-2cm-ic_exvivo.stl",
+    "activeElementLengthMm": 20.0
+  },
+  {
+    "id": "cooltip_single_2cm_ic_invivo",
+    "label": "Cool-tip single 2 cm tip (IC, in vivo)",
+    "templateFile": "Resources/geometries/10_cooltip-single-2cm-ic_invivo.stl",
+    "activeElementLengthMm": 20.0
+  },
+  {
+    "id": "cooltip_single_3cm_ic_exvivo",
+    "label": "Cool-tip single 3 cm tip (IC, ex vivo)",
+    "templateFile": "Resources/geometries/11_cooltip-single-3cm-ic_exvivo.stl",
+    "activeElementLengthMm": 30.0
+  },
+  {
+    "id": "cooltip_single_3cm_ic_invivo",
+    "label": "Cool-tip single 3 cm tip (IC, in vivo)",
+    "templateFile": "Resources/geometries/12_cooltip-single-3cm-ic_invivo.stl",
+    "activeElementLengthMm": 30.0
+  },
+  {
+    "id": "cooltip_cluster_2_5cm_nominal",
+    "label": "Cool-tip cluster 2.5 cm tip (nominal 4.5 cm zone)",
+    "templateFile": "Resources/geometries/13_cooltip-cluster-2_5cm_nominal.stl",
+    "activeElementLengthMm": 25.0
+  },
+  {
+    "id": "cooltip_multi3_3cm_switched_invivo",
+    "label": "Cool-tip 3-electrode switched 3 cm (in vivo)",
+    "templateFile": "Resources/geometries/14_cooltip-multi3-3cm-switched_invivo.stl",
+    "activeElementLengthMm": 30.0
   }
 ]

@@ -68,7 +68,7 @@ Quick start in beginner mode:
 
 1. Import a case folder or load a bundled sample case.
 2. Open Segment Editor and confirm tumor plus critical structures.
-3. Create exactly two trajectory points: applicator endpoint first, entry point second.
+3. Create exactly two trajectory points: entry point first, applicator endpoint second.
 4. Validate the trajectory against critical structures. If it fails, click `Auto-adjust Endpoint` to run the conservative 15 mm rescue search.
 5. Select geometry, place the applicator, create the ablation volume, and run `Evaluate MAM`.
 6. If MAM passes, lock the master plan, set `Spare (mm)` if needed (default `5`), and compute the coaxial plan.
@@ -83,11 +83,11 @@ Use this glossary when reading the UI and outputs.
 | Segment | One labeled structure inside a segmentation. | A segmentation entry identified by a segment ID and name. |
 | Tumor segmentation | The structure you want to treat. | The target segmentation node used for margin and coverage-related computations. |
 | Risk structures segmentation | Nearby structures you want to avoid. | Optional segmentation node containing one or more structures-at-risk for distance checks. |
-| Markups endpoint node | A list of points that define trajectories. | A `vtkMRMLMarkupsFiducialNode` whose control points are parsed in endpoint/entry pairs. |
+| Markups endpoint node | A list of points that define trajectories. | A `vtkMRMLMarkupsFiducialNode` whose control points are parsed in entry/endpoint pairs. |
 | Control point | A single planned point you place manually. | A fiducial point in markups with index and RAS coordinates. |
-| Entry point | Where a probe enters tissue. | Second point of each pair. |
-| Target point | Where a probe aims inside/near the target. | First point of each pair (applicator endpoint). |
-| Trajectory | One planned path from entry to target. | Vector/path derived from one endpoint-entry pair (endpoint first in markups). |
+| Entry point | Where a probe enters tissue. | First point of each pair. |
+| Target point | Where a probe aims inside/near the target. | Second point of each pair (applicator endpoint). |
+| Trajectory | One planned path from entry to target. | Vector/path derived from one entry-endpoint pair (entry first in markups). |
 | Trajectory line | A visible line for a trajectory. | Generated `vtkMRMLMarkupsLineNode` owned by the module. |
 | Combined ablation zone | The union of all placed probe zones. | `SV3D Combined Ablation Zone` segmentation created from generated instances. |
 | Registration | Aligning structures from one space to another. | Rigid transform computed from native and registered fiducials. |
@@ -113,7 +113,7 @@ Use this glossary when reading the UI and outputs.
 Required inputs:
 
 - reference probe/applicator segmentation
-- endpoint markups (endpoint/entry pairs)
+- endpoint markups (entry/endpoint pairs)
 - tumor segmentation
 
 Optional inputs:
@@ -124,7 +124,7 @@ Optional inputs:
 Important endpoint rule:
 
 - endpoint markups must have an even number of points:
-  - entry1, target1, entry2, target2, ...
+  - entry1, endpoint1, entry2, endpoint2, ...
 
 ## 4. Input Selection Guide (Detailed)
 
@@ -159,15 +159,15 @@ Simple example:
 
 How to enter points:
 
-- point 1 = applicator endpoint for trajectory 1
-- point 2 = entry for trajectory 1
-- point 3 = applicator endpoint for trajectory 2
-- point 4 = entry for trajectory 2
+- point 1 = entry for trajectory 1
+- point 2 = applicator endpoint for trajectory 1
+- point 3 = entry for trajectory 2
+- point 4 = applicator endpoint for trajectory 2
 
 Do not:
 
 - leave odd number of points
-- swap endpoint/entry order for some pairs
+- swap entry/endpoint order for some pairs
 
 ### 4.3 Tumor segmentation
 
@@ -196,7 +196,7 @@ If missing:
 In **Inputs**:
 
 1. Select `Probe segmentation` (source template).
-2. Select `Trajectory endpoint markups` (endpoint/entry pairs).
+2. Select `Trajectory endpoint markups` (entry/endpoint pairs).
 3. Optionally enable:
    - `Create trajectory lines on placement`
    - `Clear previous generated probes`
@@ -341,7 +341,7 @@ Check:
 Check:
 
 - source probe template orientation (expected local negative Z forward)
-- endpoint/entry ordering in markups
+- entry/endpoint ordering in markups
 - coordinate consistency of markups and segmentations
 
 ### Cohort run fails
@@ -376,7 +376,7 @@ These values are stored in the module parameter node and restored with the scene
 | Parameter key | UI control | What it controls | Expected value / example |
 |---|---|---|---|
 | `referenceProbeSegmentation` | `probeSegmentationSelector` | Source probe/applicator template geometry used for placement. | Segmentation node with a valid closed-surface segment. |
-| `endpointsMarkups` | `endpointsMarkupsSelector` | Entry/target fiducial list used to define trajectories. | Markups fiducial node with even number of points. |
+| `endpointsMarkups` | `endpointsMarkupsSelector` | Entry/endpoint fiducial list used to define trajectories. | Markups fiducial node with even number of points. |
 | `createTrajectoryLinesOnPlacement` | `createTrajectoryLinesOnPlacementCheckBox` | Auto-create line markups after probe placement. | `true` or `false`. |
 | `clearPreviousGeneratedProbes` | `clearPreviousGeneratedProbesCheckBox` | Clear prior generated probes/lines before new placement. | `true` or `false`. |
 | `tumorSegmentation` | `tumorSegmentationSelector` | Target/tumor segmentation used in evaluation. | Segmentation node with at least one valid target segment. |

@@ -57,8 +57,8 @@ Goal after Step 2:
 
 1. In `Endpoint markups`, select or create a markups node.
 2. Place exactly **2 points** in this exact order:
-   1. Point 1 = **applicator endpoint** (target area)
-   2. Point 2 = **entry point** (skin/liver entry)
+   1. Point 1 = **entry point** (skin/liver entry)
+   2. Point 2 = **applicator endpoint** (target area)
 3. Click `Preview Master Trajectory` (or `Preview Planned Trajectories` if you changed mode).
 
 Important:

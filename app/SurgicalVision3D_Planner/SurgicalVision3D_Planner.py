@@ -140,6 +140,7 @@ BEGINNER_WORKFLOW_BANNER_TEXT = (
 )
 BEGINNER_MAM_COLOR_NODE_NAME = "SV3D Beginner MAM Colors"
 BEGINNER_TRAJECTORY_DISTANCE_SAMPLE_COUNT = 121
+LINE_THICKNESS_SCALE = 0.20
 BEGINNER_AUTO_ADJUST_ENDPOINT_BUTTON_TEXT = "Auto-adjust Endpoint"
 AUTO_ADJUST_MAX_ENDPOINT_SHIFT_MM = 15.0
 AUTO_ADJUST_ENDPOINT_SHIFT_STEP_MM = 1.5
@@ -147,6 +148,11 @@ AUTO_ADJUST_AZIMUTH_SAMPLE_COUNT = 36
 DEFAULT_CT_ABDOMEN_WINDOW = 350.0
 DEFAULT_CT_ABDOMEN_LEVEL = 40.0
 EVALUATE_DERIVED_BUNDLE_INLINE_ON_PLACEMENT = False
+USE_SEGMENT_EDITOR_UNION_FOR_PROBE_MERGE = False
+# Guard rail: VTK distance fast path can hard-crash on malformed surfaces in some scenes.
+# Keep disabled by default and enable only after validating scene geometry stability.
+ENABLE_VTK_DISTANCE_FAST_PATH = False
+ENABLE_MAM_DEBUG_LOGGING = True
 
 
 def _normalize_vector(vector: Sequence[float]) -> np.ndarray:
@@ -468,7 +474,7 @@ class SurgicalVision3D_Planner(ScriptedLoadableModule):
         self.parent.contributors = ["Juan Verde (Surgeon Scientist)"]
         self.parent.helpText = _("""
 Phase 1 ablation planning prototype:
-1. Generate trajectories from endpoint control-point pairs.
+1. Generate trajectories from entry/endpoint control-point pairs.
 2. Place translated probe segmentations along trajectories.
 3. Merge translated probes into one ablation zone.
 4. Evaluate tumor-vs-ablation signed margins using signed closest-point distances.
@@ -923,7 +929,9 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         self._gitEntryLineEdit.placeholderText = "Log entry (optional note for git_agent_log.md)..."
         gitFormLayout.addRow("Agent log entry:", self._gitEntryLineEdit)
 
-        buttonRowLayout = qt.QHBoxLayout()
+        buttonRowWidget = qt.QWidget()
+        buttonRowLayout = qt.QHBoxLayout(buttonRowWidget)
+        buttonRowLayout.setContentsMargins(0, 0, 0, 0)
         self._gitRefreshButton = qt.QPushButton("Refresh")
         self._gitStageAllButton = qt.QPushButton("Stage All")
         self._gitCommitButton = qt.QPushButton("Commit")
@@ -934,7 +942,8 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         buttonRowLayout.addWidget(self._gitCommitButton)
         buttonRowLayout.addWidget(self._gitPushButton)
         buttonRowLayout.addWidget(self._gitAddEntryButton)
-        gitFormLayout.addRow(buttonRowLayout)
+        buttonRowLayout.addStretch(1)
+        gitFormLayout.addRow(buttonRowWidget)
 
         self._gitRefreshButton.setToolTip("Refresh branch, pending changes, and recent commits.")
         self._gitStageAllButton.setToolTip("Stage all tracked/untracked changes using 'git add -A'.")
@@ -1113,7 +1122,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         trajectorySection.text = "Step 3 - Define Master Trajectory"
         trajectoryLayout = qt.QFormLayout(trajectorySection)
         trajectoryInstructionLabel = self._createStatusLabel(
-            "Use exactly two points in the markups node: applicator endpoint first, entry point second."
+            "Use exactly two points in the markups node: entry point first, applicator endpoint second."
         )
         self._endpointsPlaceWidget = None
         if hasattr(slicer, "qSlicerMarkupsPlaceWidget"):
@@ -1211,7 +1220,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         lockSection = ctk.ctkCollapsibleButton()
         lockSection.text = "Step 6 - Lock + Coaxial Plan"
         lockLayout = qt.QFormLayout(lockSection)
-        self._lockMasterPlanButton = qt.QPushButton("Lock Validated Master Plan")
+        self._lockMasterPlanButton = qt.QPushButton("Lock Master Plan")
         self._resetMasterPlanButton = qt.QPushButton("Reset Lock")
         self._coaxialTechniqueComboBox = qt.QComboBox()
         self._coaxialTechniqueComboBox.addItem("PullBack")
@@ -1593,10 +1602,10 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         if not endpointsMarkups or int(endpointsMarkups.GetNumberOfControlPoints()) < 2:
             return None
 
-        endpointPoint = [0.0, 0.0, 0.0]
         entryPoint = [0.0, 0.0, 0.0]
-        endpointsMarkups.GetNthControlPointPosition(0, endpointPoint)
-        endpointsMarkups.GetNthControlPointPosition(1, entryPoint)
+        endpointPoint = [0.0, 0.0, 0.0]
+        endpointsMarkups.GetNthControlPointPosition(0, entryPoint)
+        endpointsMarkups.GetNthControlPointPosition(1, endpointPoint)
         endpointVector = np.array(endpointPoint, dtype=float)
         entryVector = np.array(entryPoint, dtype=float)
         axisVector = endpointVector - entryVector
@@ -1621,7 +1630,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         midpoint = 0.5 * (endpointVector + entryVector)
         anchorOffsetMm = min(max(axisNorm * 0.25, 3.0), 12.0)
         anchorPoint = midpoint + (orthogonalDirection * anchorOffsetMm)
-        return np.array([endpointVector, entryVector, anchorPoint], dtype=float)
+        return np.array([entryVector, endpointVector, anchorPoint], dtype=float)
 
     def _autoSeedRegistrationFiducialsFromEndpoints(self) -> bool:
         if not self._parameterNode:
@@ -1639,7 +1648,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             return False
         slicer.util.updateMarkupsControlPointsFromArray(nativeFiducials, seededPoints)
         slicer.util.updateMarkupsControlPointsFromArray(registeredFiducials, seededPoints)
-        fiducialLabels = ("Auto Endpoint", "Auto Entry", "Auto Anchor")
+        fiducialLabels = ("Auto Entry", "Auto Endpoint", "Auto Anchor")
         for markupsNode in (nativeFiducials, registeredFiducials):
             if hasattr(markupsNode, "SetAttribute"):
                 markupsNode.SetAttribute("SV3D.AutoSeededFromEndpoints", "1")
@@ -1964,8 +1973,8 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 "into this selector. The template is expected to be oriented along local -Z."
             ),
             "endpointsMarkupsSelector": (
-                "Select trajectory endpoints as ordered endpoint/entry pairs with an even number of control points: "
-                "endpoint1,entry1,endpoint2,entry2,..."
+                "Select trajectory endpoints as ordered entry/endpoint pairs with an even number of control points: "
+                "entry1,endpoint1,entry2,endpoint2,..."
             ),
             "tumorSegmentationSelector": (
                 "Select the tumor/target segmentation used for margin evaluation, coverage context, and no-touch checks."
@@ -1982,8 +1991,8 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             "createTrajectoryLinesOnPlacementCheckBox": "If enabled, trajectory lines are generated automatically after placing probes.",
             "clearPreviousGeneratedProbesCheckBox": "If enabled, previous generated probes/lines and owned derived outputs are cleared before placement.",
             # Workflow actions
-            "placeProbesButton": "Place probe instances along each endpoint-pair trajectory.",
-            "createTrajectoryLinesButton": "Create or refresh line markups from endpoint pairs.",
+            "placeProbesButton": "Place probe instances along each entry/endpoint-pair trajectory.",
+            "createTrajectoryLinesButton": "Create or refresh line markups from entry/endpoint pairs.",
             "mergeTranslatedProbesButton": "Merge generated probe instances into one combined ablation segmentation.",
             "registerTumorButton": "Compute rigid transform from native to registered fiducials and apply it to the tumor segmentation.",
             "hardenTumorTransformButton": "Permanently harden the current tumor transform into the segmentation geometry.",
@@ -2077,10 +2086,10 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             "sampleCaseComboBox": "Pick a sample case first, then click Load.",
             "loadSampleCaseButton": "Load the selected sample scene.",
             "probeSegmentationSelector": "Choose the probe template geometry to place on each trajectory.",
-            "endpointsMarkupsSelector": "Choose exactly two points: applicator endpoint first, entry point second.",
+            "endpointsMarkupsSelector": "Choose exactly two points: entry point first, applicator endpoint second.",
             "tumorSegmentationSelector": "Choose the target tumor segmentation for margin evaluation.",
             "riskStructuresSegmentationSelector": "Choose the segmentation that contains the critical structures to avoid.",
-            "placeProbesButton": "Create probe instances from endpoint pairs.",
+            "placeProbesButton": "Create probe instances from entry/endpoint pairs.",
             "mergeTranslatedProbesButton": "Union the placed probes into one combined ablation zone.",
             "evaluateMarginsButton": "Compute signed margins between the target tumor and the combined ablation zone.",
             "createTrajectoryLinesButton": "Preview the currently planned trajectory set (master only or master + derived array).",
@@ -2121,11 +2130,11 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self._mamSpinBox.setToolTip("Minimal Ablative Margin in mm. Default is 10 mm.")
         if self._placeMultipleControlPointsCheckBox:
             self._placeMultipleControlPointsCheckBox.setToolTip(
-                "Keep markup placement active after each click so you can place endpoint/entry points consecutively."
+                "Keep markup placement active after each click so you can place entry/endpoint points consecutively."
             )
         if self._endpointsPlaceWidget:
             self._endpointsPlaceWidget.setToolTip(
-                "Place endpoint/entry control points directly from this module."
+                "Place entry/endpoint control points directly from this module."
             )
         if self._validateTrajectoryButton:
             self._validateTrajectoryButton.setToolTip("Check whether the master trajectory intersects any critical-structure segment.")
@@ -2135,7 +2144,9 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 f"and applies only if a zero-intersection endpoint is found inside tumor within {AUTO_ADJUST_MAX_ENDPOINT_SHIFT_MM:.1f} mm."
             )
         if self._lockMasterPlanButton:
-            self._lockMasterPlanButton.setToolTip("Lock the current validated master trajectory and save its snapshot.")
+            self._lockMasterPlanButton.setToolTip(
+                "Lock the current master trajectory after successful MAM assessment and save its snapshot."
+            )
         if self._resetMasterPlanButton:
             self._resetMasterPlanButton.setToolTip("Unlock the master plan and clear the saved lock/coaxial outputs.")
         if self._coaxialTechniqueComboBox:
@@ -2183,6 +2194,12 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         self.setParameterNode(None)
 
     def onSceneStartImport(self, caller, event) -> None:
+        scene = slicer.mrmlScene
+        isImporting = bool(scene.IsImporting()) if hasattr(scene, "IsImporting") else True
+        # Ignore synthetic/import-like notifications that can occur during local batch processing.
+        if not isImporting:
+            self._logStepTrace("Runtime", "Scene import start event ignored (scene.IsImporting() is False).")
+            return
         self._sceneImportInProgress = True
         self._step123TraceSignature = ""
         self._disconnectParameterNodeGui()
@@ -2214,6 +2231,14 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         qt.QTimer.singleShot(0, self._initializeParameterNodeWhenSceneReady)
 
     def onSceneEndImport(self, caller, event) -> None:
+        scene = slicer.mrmlScene
+        isImporting = bool(scene.IsImporting()) if hasattr(scene, "IsImporting") else False
+        if isImporting:
+            # End event may arrive while scene still reports importing; wait for the real completion.
+            self._logStepTrace("Runtime", "Scene import end event deferred (scene.IsImporting() is still True).")
+            return
+        if not self._sceneImportInProgress:
+            return
         self._sceneImportInProgress = False
         self._logStepTrace("Runtime", "Scene import finished.")
         qt.QTimer.singleShot(0, self._initializeParameterNodeWhenSceneReady)
@@ -2457,6 +2482,8 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self._parameterNode.riskStructuresSegmentation = self._parameterNode.criticalStructuresSegmentation
 
         for nodeFieldName in (
+            "referenceProbeSegmentation",
+            "tumorSegmentation",
             "criticalStructuresSegmentation",
             "combinedProbeSegmentation",
             "outputMarginModel",
@@ -2464,6 +2491,9 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             "tumorTransform",
             "coaxialNavigationTarget",
             "riskStructuresSegmentation",
+            "endpointsMarkups",
+            "nativeFiducials",
+            "registeredFiducials",
             "trajectorySummaryTable",
             "derivedTrajectorySummaryTable",
             "planSummaryTable",
@@ -2489,7 +2519,13 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             "derivedTrajectoryPreviewNode",
         ):
             node = getattr(self._parameterNode, nodeFieldName)
-            if node and not slicer.mrmlScene.IsNodePresent(node):
+            if not node:
+                continue
+            try:
+                nodeIsPresent = bool(slicer.mrmlScene.IsNodePresent(node))
+            except Exception:
+                nodeIsPresent = False
+            if not nodeIsPresent:
                 setattr(self._parameterNode, nodeFieldName, None)
 
         expectedNodeClassesByFieldName: dict[str, str] = {
@@ -2505,7 +2541,20 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
         }
         for nodeFieldName, expectedClassName in expectedNodeClassesByFieldName.items():
             node = getattr(self._parameterNode, nodeFieldName)
-            if node and (not hasattr(node, "IsA") or not node.IsA(expectedClassName)):
+            if not node:
+                continue
+            try:
+                nodeIsPresent = bool(slicer.mrmlScene.IsNodePresent(node))
+            except Exception:
+                nodeIsPresent = False
+            if not nodeIsPresent:
+                setattr(self._parameterNode, nodeFieldName, None)
+                continue
+            try:
+                classMatches = bool(hasattr(node, "IsA") and node.IsA(expectedClassName))
+            except Exception:
+                classMatches = False
+            if not classMatches:
                 setattr(self._parameterNode, nodeFieldName, None)
 
     def _clearOwnedSafetyOutputs(self, clearReferences: bool = False) -> None:
@@ -2937,7 +2986,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 else "Preview Master Trajectory"
             )
         if self._lockMasterPlanButton:
-            self._lockMasterPlanButton.enabled = (trajectoryValidationPass and mamValidationPass and not isLocked)
+            self._lockMasterPlanButton.enabled = (hasSingleMasterTrajectory and mamValidationPass and not isLocked)
         if self._resetMasterPlanButton:
             self._resetMasterPlanButton.enabled = isLocked
         if self._coaxialSpareSpinBox:
@@ -2956,11 +3005,6 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                     step6StatusText = "Blocked: lock is stale because the master plan snapshot is missing. Reset and lock again."
             else:
                 blockedReasons: list[str] = []
-                if not trajectoryValidationPass:
-                    trajectoryStatusText = str(
-                        trajectoryValidationSummary.get("StatusText", "Trajectory not validated.")
-                    ).strip()
-                    blockedReasons.append(f"Step 4 trajectory validation not passed ({trajectoryStatusText})")
                 if not mamValidationPass:
                     mamStatusText = str(
                         mamAssessmentSummary.get("StatusText", "MAM assessment not run.")
@@ -2969,7 +3013,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 if blockedReasons:
                     step6StatusText = "Blocked: " + "; ".join(blockedReasons) + "."
                 else:
-                    step6StatusText = "Ready: click Lock Validated Master Plan."
+                    step6StatusText = "Ready: click Lock Master Plan."
             self._setStatusLabelText(self._coaxialStatusLabel, step6StatusText)
         if self._derivedArrayStatusLabel:
             if not isMultiTrajectoryArrayMode:
@@ -3634,8 +3678,6 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 raise RuntimeError("Module logic is not initialized.")
             trajectoryValidationSummary = self._jsonSummary(self._parameterNode.trajectoryValidationSummaryJson)
             mamAssessmentSummary = self._jsonSummary(self._parameterNode.mamAssessmentSummaryJson)
-            if not bool(trajectoryValidationSummary.get("TrajectoryPass", False)):
-                raise ValueError("Validate the master trajectory successfully before locking the plan.")
             if not bool(mamAssessmentSummary.get("MamPass", False)):
                 raise ValueError("Run MAM assessment successfully before locking the plan.")
 
@@ -3657,7 +3699,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 directionVector=tuple(float(value) for value in trajectory.directionVector),
                 trajectoryLengthMm=float(trajectory.lengthMm),
                 activeElementLengthMm=float(geometryEntry.activeElementLengthMm),
-                trajectoryValidationPass=True,
+                trajectoryValidationPass=bool(trajectoryValidationSummary.get("TrajectoryPass", False)),
                 marginValidationPass=True,
                 lockedAtISO=datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
                 tumorSegmentationID=self._parameterNode.tumorSegmentation.GetID() if self._parameterNode.tumorSegmentation else "",
@@ -3901,11 +3943,11 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             if BEGINNER_WORKFLOW_MODE and controlPointCount != 2:
                 raise ValueError(
                     f"Beginner workflow expects exactly 2 control points, but found {controlPointCount}. "
-                    "Place one applicator endpoint and one entry point (endpoint first)."
+                    "Place one entry point and one applicator endpoint (entry first)."
                 )
             if controlPointCount % 2 != 0:
                 raise ValueError(
-                    f"Endpoint markups has {controlPointCount} control points. Add one more point to complete endpoint/entry pairs."
+                    f"Endpoint markups has {controlPointCount} control points. Add one more point to complete entry/endpoint pairs."
                 )
             resolvedReferenceProbeSegmentation = self.logic.resolveUsableReferenceProbeSegmentation(
                 self._parameterNode.referenceProbeSegmentation
@@ -3930,7 +3972,27 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                 ),
             )
             if self._parameterNode.clearPreviousGeneratedProbes:
-                self.logic.removeGeneratedProbeNodes()
+                keepGeneratedReferenceProbeNodeID = None
+                referenceProbeIsPresent = False
+                if resolvedReferenceProbeSegmentation:
+                    try:
+                        referenceProbeIsPresent = bool(slicer.mrmlScene.IsNodePresent(resolvedReferenceProbeSegmentation))
+                    except Exception:
+                        referenceProbeIsPresent = False
+                if (
+                    resolvedReferenceProbeSegmentation
+                    and referenceProbeIsPresent
+                    and str(resolvedReferenceProbeSegmentation.GetAttribute(GENERATED_PROBE_ATTRIBUTE) or "") == "1"
+                ):
+                    keepGeneratedReferenceProbeNodeID = resolvedReferenceProbeSegmentation.GetID()
+                    self._logStepTrace(
+                        "Step5",
+                        (
+                            "Preserving selected generated reference probe during cleanup "
+                            f"(node='{self._nodeDisplayName(resolvedReferenceProbeSegmentation)}')."
+                        ),
+                    )
+                self.logic.removeGeneratedProbeNodes(keepNodeID=keepGeneratedReferenceProbeNodeID)
                 self.logic.removeGeneratedTrajectoryLines()
                 self._clearOwnedDerivedOutputs(clearReferences=True, clearBeginnerOutputs=False)
                 self._parameterNode.generatedProbeNodeIDs = "[]"
@@ -4000,11 +4062,11 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             if BEGINNER_WORKFLOW_MODE and controlPointCount != 2:
                 raise ValueError(
                     f"Beginner workflow expects exactly 2 control points, but found {controlPointCount}. "
-                    "Place one applicator endpoint and one entry point (endpoint first)."
+                    "Place one entry point and one applicator endpoint (entry first)."
                 )
             if controlPointCount % 2 != 0:
                 raise ValueError(
-                    f"Endpoint markups has {controlPointCount} control points. Add one more point to complete endpoint/entry pairs."
+                    f"Endpoint markups has {controlPointCount} control points. Add one more point to complete entry/endpoint pairs."
                 )
             self._logStepTrace(
                 "Step3",
@@ -4294,6 +4356,19 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
                     raise ValueError("No probe segmentation is available for margin evaluation. Place and merge probes first.")
                 probeSegmentation = self.logic.mergeProbeInstances(generatedProbeNodeIDs, self._parameterNode.combinedProbeSegmentation)
                 self._parameterNode.combinedProbeSegmentation = probeSegmentation
+            if ENABLE_MAM_DEBUG_LOGGING:
+                generatedProbeCount = len(
+                    self.logic.resolveExistingNodeIDs(
+                        self.logic.deserializeNodeIDs(self._parameterNode.generatedProbeNodeIDs)
+                    )
+                )
+                logging.info(
+                    "MAM debug: onEvaluateMarginsButton inputs | tumor='%s' | probe='%s' | generatedProbeCount=%d | mamMm=%.2f",
+                    self._nodeDisplayName(self._parameterNode.tumorSegmentation),
+                    self._nodeDisplayName(probeSegmentation),
+                    generatedProbeCount,
+                    float(self._parameterNode.mamMm),
+                )
 
             signedDistanceStartTime = time.perf_counter()
             outputMarginModel, resultTable, summary = self.logic.evaluateMargins(
@@ -4311,7 +4386,7 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             logging.info("Margin summary: %s", summary)
 
             mamColoringStartTime = time.perf_counter()
-            signedMarginValues = self.logic.getSignedMarginValues(outputMarginModel)
+            signedMarginValues = self.logic.getSignedMarginValuesArray(outputMarginModel)
             mamAssessmentSummary = self.logic.applyBeginnerMamColoring(outputMarginModel, float(self._parameterNode.mamMm))
             self._logStepTrace(
                 "Step5",
@@ -4363,40 +4438,66 @@ class SurgicalVision3D_PlannerWidget(ScriptedLoadableModuleWidget, VTKObservatio
             self._parameterNode.planSummaryTable = planSummaryTable
             self._parameterNode.marginThresholdSummaryTable = marginThresholdSummaryTable
 
-            safetyStartTime = time.perf_counter()
-            structureSafetySummaryRows, structureSafetyThresholdRows = self.logic.evaluateStructureSafety(
-                self._parameterNode.criticalStructuresSegmentation,
-                probeSegmentation,
+            if BEGINNER_WORKFLOW_MODE:
+                self._clearOwnedSafetyOutputs(clearReferences=True)
+                self._clearOwnedCoordinationOutputs(clearReferences=True)
+                self._logStepTrace(
+                    "Step5",
+                    "Beginner workflow: MAM outputs completed; skipped structure-safety and coordination evaluations.",
+                )
+                self._logStepTrace("Step5", f"Evaluate MAM total time: {time.perf_counter() - stepStartTime:.2f}s.")
+                self._updateButtonStates()
+                return
+
+            shouldEvaluateStructureSafety = bool(
+                (not BEGINNER_WORKFLOW_MODE)
+                and self._parameterNode.criticalStructuresSegmentation
             )
-            self._logStepTrace(
-                "Step5",
-                (
-                    f"Structure-safety evaluation finished in {time.perf_counter() - safetyStartTime:.2f}s "
-                    f"for {len(structureSafetySummaryRows)} segments."
-                ),
-            )
-            if len(structureSafetySummaryRows) > 0:
-                structureSafetySummaryTable = self.logic.createOrReuseOwnedOutputNode(
-                    "vtkMRMLTableNode",
-                    STRUCTURE_SAFETY_SUMMARY_TABLE_NODE_NAME,
-                    GENERATED_STRUCTURE_SAFETY_SUMMARY_TABLE_ATTRIBUTE,
-                    self._parameterNode.structureSafetySummaryTable,
+            if shouldEvaluateStructureSafety:
+                safetyStartTime = time.perf_counter()
+                try:
+                    structureSafetySummaryRows, structureSafetyThresholdRows = self.logic.evaluateStructureSafety(
+                        self._parameterNode.criticalStructuresSegmentation,
+                        probeSegmentation,
+                    )
+                except Exception:
+                    logging.exception("Structure-safety evaluation failed; continuing with MAM outputs only.")
+                    structureSafetySummaryRows, structureSafetyThresholdRows = [], []
+                self._logStepTrace(
+                    "Step5",
+                    (
+                        f"Structure-safety evaluation finished in {time.perf_counter() - safetyStartTime:.2f}s "
+                        f"for {len(structureSafetySummaryRows)} segments."
+                    ),
                 )
-                structureSafetyThresholdSummaryTable = self.logic.createOrReuseOwnedOutputNode(
-                    "vtkMRMLTableNode",
-                    STRUCTURE_SAFETY_THRESHOLD_SUMMARY_TABLE_NODE_NAME,
-                    GENERATED_STRUCTURE_SAFETY_THRESHOLD_TABLE_ATTRIBUTE,
-                    self._parameterNode.structureSafetyThresholdSummaryTable,
-                )
-                self.logic.populateStructureSafetySummaryTable(structureSafetySummaryTable, structureSafetySummaryRows)
-                self.logic.populateStructureSafetyThresholdSummaryTable(
-                    structureSafetyThresholdSummaryTable,
-                    structureSafetyThresholdRows,
-                )
-                self._parameterNode.structureSafetySummaryTable = structureSafetySummaryTable
-                self._parameterNode.structureSafetyThresholdSummaryTable = structureSafetyThresholdSummaryTable
+                if len(structureSafetySummaryRows) > 0:
+                    structureSafetySummaryTable = self.logic.createOrReuseOwnedOutputNode(
+                        "vtkMRMLTableNode",
+                        STRUCTURE_SAFETY_SUMMARY_TABLE_NODE_NAME,
+                        GENERATED_STRUCTURE_SAFETY_SUMMARY_TABLE_ATTRIBUTE,
+                        self._parameterNode.structureSafetySummaryTable,
+                    )
+                    structureSafetyThresholdSummaryTable = self.logic.createOrReuseOwnedOutputNode(
+                        "vtkMRMLTableNode",
+                        STRUCTURE_SAFETY_THRESHOLD_SUMMARY_TABLE_NODE_NAME,
+                        GENERATED_STRUCTURE_SAFETY_THRESHOLD_TABLE_ATTRIBUTE,
+                        self._parameterNode.structureSafetyThresholdSummaryTable,
+                    )
+                    self.logic.populateStructureSafetySummaryTable(structureSafetySummaryTable, structureSafetySummaryRows)
+                    self.logic.populateStructureSafetyThresholdSummaryTable(
+                        structureSafetyThresholdSummaryTable,
+                        structureSafetyThresholdRows,
+                    )
+                    self._parameterNode.structureSafetySummaryTable = structureSafetySummaryTable
+                    self._parameterNode.structureSafetyThresholdSummaryTable = structureSafetyThresholdSummaryTable
+                else:
+                    self._clearOwnedSafetyOutputs(clearReferences=True)
             else:
                 self._clearOwnedSafetyOutputs(clearReferences=True)
+                self._logStepTrace(
+                    "Step5",
+                    "Structure-safety evaluation skipped in beginner workflow mode.",
+                )
 
             if self._parameterNode.endpointsMarkups and not BEGINNER_WORKFLOW_MODE:
                 controlPointCount = int(self._parameterNode.endpointsMarkups.GetNumberOfControlPoints())
@@ -5440,6 +5541,23 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
                 except Exception:
                     logging.exception("Failed to load fallback sample-case segmentation: %s", segmentationPath)
 
+            markupsCandidatesByPath: dict[str, Path] = {}
+            for markupsPattern in ("*.mrk.json", "*.fcsv"):
+                for candidatePath in caseDirectory.glob(markupsPattern):
+                    if candidatePath.is_file():
+                        normalizedPath = SurgicalVision3D_PlannerLogic._normalizeFilesystemPath(candidatePath)
+                        if normalizedPath not in markupsCandidatesByPath:
+                            markupsCandidatesByPath[normalizedPath] = candidatePath
+            markupsCandidates = sorted(
+                markupsCandidatesByPath.values(),
+                key=lambda candidatePath: candidatePath.name.lower(),
+            )
+            for markupsPath in markupsCandidates:
+                try:
+                    loadedAny = SurgicalVision3D_PlannerLogic._loadMarkupsFile(markupsPath) or loadedAny
+                except Exception:
+                    logging.exception("Failed to load fallback sample-case markups: %s", markupsPath)
+
             logic = SurgicalVision3D_PlannerLogic()
             for segmentationNode in slicer.util.getNodesByClass("vtkMRMLSegmentationNode"):
                 logic._ensureSegmentationReferenceImageGeometry(segmentationNode)
@@ -5452,6 +5570,23 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
 
         SurgicalVision3D_PlannerLogic().ensureReferenceProbeTemplatesLoaded()
         return loadedAny
+
+    @staticmethod
+    def _loadMarkupsFile(markupsPath: Path) -> bool:
+        loadMarkups = getattr(slicer.util, "loadMarkups", None)
+        if callable(loadMarkups):
+            return bool(loadMarkups(str(markupsPath)))
+
+        loadNodeFromFile = getattr(slicer.util, "loadNodeFromFile", None)
+        if callable(loadNodeFromFile):
+            loadedNode = loadNodeFromFile(str(markupsPath), "MarkupsFile")
+            return loadedNode is not None
+
+        loadMarkupsFiducialList = getattr(slicer.util, "loadMarkupsFiducialList", None)
+        if callable(loadMarkupsFiducialList):
+            return bool(loadMarkupsFiducialList(str(markupsPath)))
+
+        return False
 
     def resolveUsableReferenceProbeSegmentation(
         self,
@@ -7089,9 +7224,9 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
 
         trajectories: list[ProbeTrajectory] = []
         for pointIndex in range(0, pointCount, 2):
-            # Point-pair order is endpoint first, entry second.
-            endpoint = np.array(pointsRAS[pointIndex], dtype=float)
-            entry = np.array(pointsRAS[pointIndex + 1], dtype=float)
+            # Point-pair order is entry first, applicator endpoint second.
+            entry = np.array(pointsRAS[pointIndex], dtype=float)
+            endpoint = np.array(pointsRAS[pointIndex + 1], dtype=float)
             if endpoint.size != 3 or entry.size != 3:
                 raise ValueError(
                     f"Control-point pair {pointIndex}-{pointIndex + 1} must contain 3D coordinates."
@@ -7157,7 +7292,10 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         for trajectory in trajectories:
             if trajectory.sourceControlPointIndices is None:
                 continue
-            label = endpointsMarkups.GetNthControlPointLabel(trajectory.sourceControlPointIndices[0])
+            endpointLabelIndex = int(trajectory.sourceControlPointIndices[1])
+            label = endpointsMarkups.GetNthControlPointLabel(endpointLabelIndex)
+            if not label:
+                label = endpointsMarkups.GetNthControlPointLabel(int(trajectory.sourceControlPointIndices[0]))
             if label:
                 trajectory.label = label
         return trajectories
@@ -7226,9 +7364,9 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         if hasattr(lineDisplayNode, "SetSliceProjectionOutlinedBehindSlicePlane"):
             lineDisplayNode.SetSliceProjectionOutlinedBehindSlicePlane(False)
         if hasattr(lineDisplayNode, "SetLineThickness"):
-            lineDisplayNode.SetLineThickness(0.9)
+            lineDisplayNode.SetLineThickness(0.9 * LINE_THICKNESS_SCALE)
         elif hasattr(lineDisplayNode, "SetLineWidth"):
-            lineDisplayNode.SetLineWidth(4.0)
+            lineDisplayNode.SetLineWidth(4.0 * LINE_THICKNESS_SCALE)
         if hasattr(lineDisplayNode, "SetOpacity"):
             lineDisplayNode.SetOpacity(1.0)
         lineDisplayNode.SetPropertiesLabelVisibility(False)
@@ -7381,6 +7519,33 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             ):
                 return False
         return True
+
+    @staticmethod
+    def _polyDataSummaryText(polyData: vtk.vtkPolyData | None) -> str:
+        if polyData is None:
+            return "none"
+        pointCount = int(polyData.GetNumberOfPoints())
+        cellCount = int(polyData.GetNumberOfCells())
+        bounds = [0.0] * 6
+        try:
+            polyData.GetBounds(bounds)
+        except Exception:
+            boundsText = "(unavailable)"
+        else:
+            boundsText = (
+                f"({bounds[0]:.3f}, {bounds[1]:.3f}, {bounds[2]:.3f}, "
+                f"{bounds[3]:.3f}, {bounds[4]:.3f}, {bounds[5]:.3f})"
+            )
+        return f"points={pointCount}, cells={cellCount}, bounds={boundsText}"
+
+    @staticmethod
+    def _modelPolyDataSummaryText(modelNode: vtkMRMLModelNode | None) -> str:
+        if not modelNode:
+            return "none"
+        mesh = modelNode.GetMesh() if hasattr(modelNode, "GetMesh") else None
+        polyData = vtk.vtkPolyData.SafeDownCast(mesh)
+        modelName = str(modelNode.GetName() or "(unnamed)")
+        return f"name='{modelName}', {SurgicalVision3D_PlannerLogic._polyDataSummaryText(polyData)}"
 
     @classmethod
     def _prepareClosedSurfaceForTrajectoryValidation(
@@ -7807,21 +7972,28 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         activeElementLengthMm: float,
         spareMm: float = 0.0,
     ) -> CoaxialPlanSummary:
-        normalizedDirection = _normalize_vector(trajectory.directionVector)
+        entryPoint = np.array(trajectory.entryPointRAS, dtype=float)
+        endpoint = np.array(trajectory.targetPointRAS, dtype=float)
+        axisVector = endpoint - entryPoint
+        axisNorm = float(np.linalg.norm(axisVector))
+        if not math.isfinite(axisNorm) or axisNorm <= 1e-8:
+            normalizedDirection = _normalize_vector(trajectory.directionVector)
+        else:
+            normalizedDirection = axisVector / axisNorm
         techniqueName = str(technique or "PullBack")
         activeElementLengthMm = float(max(0.0, activeElementLengthMm))
         spareMm = float(max(0.0, spareMm))
         pushThroughOffsetMm = float(activeElementLengthMm + spareMm)
         if techniqueName == "PushThrough":
             # Offset from endpoint back toward entry so endpoint-to-navigation distance equals active element + spare.
-            navigationTarget = np.array(trajectory.targetPointRAS, dtype=float) - (normalizedDirection * pushThroughOffsetMm)
+            navigationTarget = endpoint - (normalizedDirection * pushThroughOffsetMm)
             noteText = (
                 f"Push-through: navigate the coaxial needle to the derived target, then advance the applicator "
                 f"{pushThroughOffsetMm:.1f} mm "
                 f"({activeElementLengthMm:.1f} mm active element + {spareMm:.1f} mm spare)."
             )
         else:
-            navigationTarget = np.array(trajectory.targetPointRAS, dtype=float)
+            navigationTarget = endpoint
             noteText = (
                 f"Pull-back: navigate the coaxial needle to the locked endpoint, then retract the sheath to expose "
                 f"{activeElementLengthMm:.1f} mm of active element."
@@ -7882,9 +8054,9 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
                 lineDisplayNode.SetPointLabelsVisibility(False)
                 lineDisplayNode.SetOpacity(1.0)
                 if hasattr(lineDisplayNode, "SetLineThickness"):
-                    lineDisplayNode.SetLineThickness(0.8)
+                    lineDisplayNode.SetLineThickness(0.8 * LINE_THICKNESS_SCALE)
                 elif hasattr(lineDisplayNode, "SetLineWidth"):
-                    lineDisplayNode.SetLineWidth(3.0)
+                    lineDisplayNode.SetLineWidth(3.0 * LINE_THICKNESS_SCALE)
             createdLineNodeIDs.append(lineNode.GetID())
         return createdLineNodeIDs
 
@@ -8127,8 +8299,9 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         combinedSegmentation.CreateDefaultDisplayNodes()
         self._ensureSegmentationReferenceImageGeometry(combinedSegmentation)
         self._clearSegmentationSegments(combinedSegmentation)
-
-        for nodeIndex, translatedProbeNode in enumerate(validProbeNodes):
+        appendFilter = vtk.vtkAppendPolyData()
+        appendedSurfaceCount = 0
+        for translatedProbeNode in validProbeNodes:
             self._ensureSegmentationHasClosedSurface(translatedProbeNode)
             sourceSegmentID = self.getWorkingSegmentID(
                 translatedProbeNode,
@@ -8136,26 +8309,39 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             )
             closedSurface = vtk.vtkPolyData()
             translatedProbeNode.GetClosedSurfaceRepresentation(sourceSegmentID, closedSurface)
-            if closedSurface.GetNumberOfPoints() <= 0:
+            if (
+                closedSurface.GetNumberOfPoints() <= 0
+                or closedSurface.GetNumberOfCells() <= 0
+                or not self._polyDataHasFinitePoints(closedSurface)
+            ):
                 continue
-            combinedSegmentation.AddSegmentFromClosedSurfaceRepresentation(
-                closedSurface,
-                f"Probe_{nodeIndex + 1:02d}",
-                [1.0, 0.3, 0.1],
-            )
+            surfaceCopy = vtk.vtkPolyData()
+            surfaceCopy.DeepCopy(closedSurface)
+            appendFilter.AddInputData(surfaceCopy)
+            appendedSurfaceCount += 1
 
-        if combinedSegmentation.GetSegmentation().GetNumberOfSegments() == 0:
+        if appendedSurfaceCount <= 0:
             raise RuntimeError("Unable to build combined ablation segmentation from generated probes.")
 
-        # Logical operators are labelmap-native; force edit-ready source up front to avoid
-        # interactive representation-conversion prompts and associated instability.
-        self.prepareSegmentationForEditing(combinedSegmentation)
+        appendFilter.Update()
+        cleanFilter = vtk.vtkCleanPolyData()
+        cleanFilter.SetInputConnection(appendFilter.GetOutputPort())
+        cleanFilter.Update()
 
-        try:
-            self._unionSegmentsWithLogicalOperators(combinedSegmentation)
-        except Exception as exc:
-            logging.warning("Logical operators union failed (%s). Falling back to appended surfaces.", exc)
-            self._mergeSegmentsByAppendingSurfaces(combinedSegmentation)
+        mergedSurface = vtk.vtkPolyData()
+        mergedSurface.DeepCopy(cleanFilter.GetOutput())
+        if (
+            mergedSurface.GetNumberOfPoints() <= 0
+            or mergedSurface.GetNumberOfCells() <= 0
+            or not self._polyDataHasFinitePoints(mergedSurface)
+        ):
+            raise RuntimeError("Probe merge produced an invalid combined closed surface.")
+
+        combinedSegmentation.AddSegmentFromClosedSurfaceRepresentation(
+            mergedSurface,
+            "CombinedAblationZone",
+            [1.0, 0.3, 0.1],
+        )
 
         combinedSegmentation.GetSegmentation().CreateRepresentation("Closed surface")
         if combinedSegmentation.GetSegmentation().GetNumberOfSegments() != 1:
@@ -8270,6 +8456,13 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         )
         marginModel.CreateDefaultDisplayNodes()
 
+        if ENABLE_MAM_DEBUG_LOGGING:
+            logging.info(
+                "MAM debug: evaluateMargins geometry | tumorModel: %s | probeModel: %s",
+                self._modelPolyDataSummaryText(tumorModel),
+                self._modelPolyDataSummaryText(probeModel),
+            )
+
         try:
             self.computeSignedDistanceModel(tumorModel, probeModel, marginModel)
 
@@ -8305,6 +8498,12 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             riskStructuresSegmentation,
             "structure safety evaluation",
         )
+        if ENABLE_MAM_DEBUG_LOGGING:
+            logging.info(
+                "MAM debug: evaluateStructureSafety start | riskSegmentation='%s' | segmentCount=%d",
+                str(riskStructuresSegmentation.GetName() or "(unnamed)"),
+                len(riskSegments),
+            )
         tempProbeModel = self.createOrReuseOwnedOutputNode(
             "vtkMRMLModelNode",
             TEMP_PROBE_SAFETY_MODEL_NODE_NAME,
@@ -8326,6 +8525,11 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             TEMP_PROBE_SAFETY_MODEL_NODE_NAME,
             outputModelNode=tempProbeModel,
         )
+        preparedProbeTargetPolyData = self._preparePolyDataForDistanceComputation(
+            self._requireModelPolyData(probeModel, "Target"),
+            "Target",
+            orientNormals=True,
+        )
 
         structureSafetySummaryRows: list[dict[str, float | int | str]] = []
         structureSafetyThresholdRows: list[dict[str, float | int | str]] = []
@@ -8333,19 +8537,39 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             for segmentInfo in riskSegments:
                 segmentID = str(segmentInfo["segmentID"])
                 segmentName = str(segmentInfo["segmentName"])
-                self.segmentationSegmentToModel(
-                    riskStructuresSegmentation,
-                    segmentID,
-                    TEMP_STRUCTURE_SAFETY_MODEL_NODE_NAME,
-                    outputModelNode=tempStructureModel,
-                )
+                try:
+                    self.segmentationSegmentToModel(
+                        riskStructuresSegmentation,
+                        segmentID,
+                        TEMP_STRUCTURE_SAFETY_MODEL_NODE_NAME,
+                        outputModelNode=tempStructureModel,
+                    )
+                    if ENABLE_MAM_DEBUG_LOGGING:
+                        logging.info(
+                            "MAM debug: structure segment '%s' (%s) geometry | %s",
+                            segmentName,
+                            segmentID,
+                            self._modelPolyDataSummaryText(tempStructureModel),
+                        )
 
-                # Negative values indicate structure points inside/overlapping ablation geometry.
-                self.computeSignedDistanceModel(tempStructureModel, probeModel, tempDistanceModel)
+                    # Negative values indicate structure points inside/overlapping ablation geometry.
+                    self.computeSignedDistanceModel(
+                        tempStructureModel,
+                        probeModel,
+                        tempDistanceModel,
+                        preparedTargetPolyData=preparedProbeTargetPolyData,
+                    )
 
-                signedDistanceValues = self.getSignedMarginValues(tempDistanceModel)
-                distanceSummary = self.computeDistanceSummary(signedDistanceValues)
-                thresholdSummary = self.computeDistanceThresholdSummary(signedDistanceValues)
+                    signedDistanceValues = self.getSignedMarginValuesArray(tempDistanceModel)
+                    distanceSummary = self.computeDistanceSummary(signedDistanceValues)
+                    thresholdSummary = self.computeDistanceThresholdSummary(signedDistanceValues)
+                except Exception:
+                    logging.exception(
+                        "Skipping structure-safety segment '%s' (%s) due to invalid geometry.",
+                        segmentName,
+                        segmentID,
+                    )
+                    continue
 
                 structureSafetySummaryRows.append(
                     {
@@ -8454,19 +8678,35 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         if backupArray is None:
             raise RuntimeError("Signed-distance backup array is unavailable for MAM coloring.")
 
+        backupValueCount = _data_array_value_count(backupArray)
+        signedDistanceValueCount = _data_array_value_count(signedDistanceArray)
+        if backupValueCount != signedDistanceValueCount:
+            raise RuntimeError(
+                "Signed-distance array length mismatch during MAM coloring "
+                f"(signed={signedDistanceValueCount}, backup={backupValueCount})."
+            )
+
+        backupValues = np.asarray(
+            numpy_support.vtk_to_numpy(backupArray),
+            dtype=np.float64,
+        )
+        achievedMargins = -backupValues
+        validMask = np.isfinite(achievedMargins)
+        if ENABLE_MAM_DEBUG_LOGGING:
+            logging.info(
+                "MAM debug: coloring arrays | valueCount=%d | finiteCount=%d | nonFiniteCount=%d",
+                int(backupValues.size),
+                int(np.count_nonzero(validMask)),
+                int(np.count_nonzero(~validMask)),
+            )
+
+        targetValues = numpy_support.vtk_to_numpy(signedDistanceArray)
+        bucketValues = np.zeros(backupValues.shape[0], dtype=np.float64)
         halfMamMm = float(mamMm) * 0.5
-        signedMarginsForSummary: list[float] = []
-        for pointIndex in range(_data_array_value_count(backupArray)):
-            signedDistanceValue = float(backupArray.GetValue(pointIndex))
-            achievedMargin = -signedDistanceValue
-            signedMarginsForSummary.append(signedDistanceValue)
-            if achievedMargin >= float(mamMm):
-                bucketValue = 2.0
-            elif achievedMargin >= halfMamMm:
-                bucketValue = 1.0
-            else:
-                bucketValue = 0.0
-            signedDistanceArray.SetValue(pointIndex, bucketValue)
+        bucketValues[validMask & (achievedMargins >= halfMamMm)] = 1.0
+        bucketValues[validMask & (achievedMargins >= float(mamMm))] = 2.0
+        targetValues[:] = bucketValues.astype(targetValues.dtype, copy=False)
+        signedDistanceArray.Modified()
 
         colorNode = self.ensureBeginnerMamColorNode()
         self.configureMarginDisplayNode(marginModelNode, autoRange=False, scalarRange=(0.0, 2.0))
@@ -8474,7 +8714,7 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         if displayNode:
             displayNode.SetAndObserveColorNodeID(colorNode.GetID())
         self.refreshNodeDisplay(marginModelNode)
-        return self.computeMamAssessmentSummary(signedMarginsForSummary, mamMm)
+        return self.computeMamAssessmentSummary(backupValues, mamMm)
 
     @staticmethod
     def recolorSignedDistanceArray(signedDistanceArray: vtk.vtkDataArray, thresholds: Sequence[float]) -> int:
@@ -8485,14 +8725,12 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         if len(sortedThresholds) == 0:
             raise ValueError("At least one threshold value is required.")
 
-        for pointIndex in range(_data_array_value_count(signedDistanceArray)):
-            signedDistanceValue = signedDistanceArray.GetValue(pointIndex)
-            bucketIndex = len(sortedThresholds)
-            for thresholdIndex, threshold in enumerate(sortedThresholds):
-                if signedDistanceValue < threshold:
-                    bucketIndex = thresholdIndex
-                    break
-            signedDistanceArray.SetValue(pointIndex, float(bucketIndex))
+        thresholdArray = np.asarray(sortedThresholds, dtype=np.float64)
+        targetValues = numpy_support.vtk_to_numpy(signedDistanceArray)
+        sourceValues = np.asarray(targetValues, dtype=np.float64)
+        bucketIndices = np.searchsorted(thresholdArray, sourceValues, side="right")
+        targetValues[:] = bucketIndices.astype(targetValues.dtype, copy=False)
+        signedDistanceArray.Modified()
 
         return len(sortedThresholds) + 1
 
@@ -8508,8 +8746,10 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
                 f"Signed-distance arrays must have same length. target={targetValueCount}, source={sourceValueCount}"
             )
 
-        for pointIndex in range(targetValueCount):
-            targetArray.SetValue(pointIndex, sourceArray.GetValue(pointIndex))
+        targetValues = numpy_support.vtk_to_numpy(targetArray)
+        sourceValues = np.asarray(numpy_support.vtk_to_numpy(sourceArray), dtype=targetValues.dtype)
+        np.copyto(targetValues, sourceValues, casting="unsafe")
+        targetArray.Modified()
 
     def populateResultTableFromMarginModel(self, marginModelNode: vtkMRMLModelNode, tableNode: vtkMRMLTableNode) -> None:
         if not marginModelNode or not tableNode:
@@ -8527,7 +8767,7 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
             copiedArray.SetName(sourceArray.GetName())
             tableNode.AddColumn(copiedArray)
 
-    def getSignedMarginValues(self, marginModelNode: vtkMRMLModelNode | None) -> list[float]:
+    def getSignedMarginValuesArray(self, marginModelNode: vtkMRMLModelNode | None) -> np.ndarray:
         if not marginModelNode:
             raise ValueError("Margin model node is required.")
 
@@ -8547,7 +8787,10 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
         finiteValues = signedMarginValuesArray[finiteMask]
         if finiteValues.size <= 0:
             raise RuntimeError("Signed margin model contains no finite scalar values for summary computation.")
-        return finiteValues.astype(float).tolist()
+        return finiteValues
+
+    def getSignedMarginValues(self, marginModelNode: vtkMRMLModelNode | None) -> list[float]:
+        return self.getSignedMarginValuesArray(marginModelNode).astype(float).tolist()
 
     def getWorkingSegmentInfo(self, segmentationNode: vtkMRMLSegmentationNode | None, operationName: str) -> tuple[str, str]:
         segmentID = self.getWorkingSegmentID(segmentationNode, operationName)
@@ -9453,74 +9696,231 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
     def _requireModelPolyData(modelNode: vtkMRMLModelNode, modelRole: str) -> vtk.vtkPolyData:
         mesh = modelNode.GetMesh()
         polyData = vtk.vtkPolyData.SafeDownCast(mesh)
-        if polyData is None or polyData.GetNumberOfPoints() <= 0:
-            raise RuntimeError(f"{modelRole} model '{modelNode.GetName()}' has no valid polydata points.")
+        if (
+            polyData is None
+            or polyData.GetNumberOfPoints() <= 0
+            or polyData.GetNumberOfCells() <= 0
+        ):
+            raise RuntimeError(f"{modelRole} model '{modelNode.GetName()}' has no valid polydata surface.")
+        if not SurgicalVision3D_PlannerLogic._polyDataHasFinitePoints(polyData):
+            raise RuntimeError(f"{modelRole} model '{modelNode.GetName()}' contains non-finite coordinates.")
         return polyData
+
+    @classmethod
+    def _preparePolyDataForDistanceComputation(
+        cls,
+        inputPolyData: vtk.vtkPolyData | None,
+        modelRole: str,
+        orientNormals: bool = False,
+    ) -> vtk.vtkPolyData:
+        if (
+            inputPolyData is None
+            or inputPolyData.GetNumberOfPoints() <= 0
+            or inputPolyData.GetNumberOfCells() <= 0
+        ):
+            raise RuntimeError(f"{modelRole} polydata is empty and cannot be used for distance computation.")
+
+        surfaceCopy = vtk.vtkPolyData()
+        surfaceCopy.DeepCopy(inputPolyData)
+
+        triangleFilter = vtk.vtkTriangleFilter()
+        triangleFilter.SetInputData(surfaceCopy)
+        if hasattr(triangleFilter, "PassLinesOff"):
+            triangleFilter.PassLinesOff()
+        if hasattr(triangleFilter, "PassVertsOff"):
+            triangleFilter.PassVertsOff()
+        triangleFilter.Update()
+
+        cleanFilter = vtk.vtkCleanPolyData()
+        cleanFilter.SetInputConnection(triangleFilter.GetOutputPort())
+        cleanFilter.Update()
+
+        preparedPolyData = vtk.vtkPolyData()
+        if orientNormals:
+            normalsFilter = vtk.vtkPolyDataNormals()
+            normalsFilter.SetInputConnection(cleanFilter.GetOutputPort())
+            normalsFilter.AutoOrientNormalsOn()
+            normalsFilter.ConsistencyOn()
+            normalsFilter.SplittingOff()
+            if hasattr(normalsFilter, "ComputeCellNormalsOff"):
+                normalsFilter.ComputeCellNormalsOff()
+            normalsFilter.Update()
+            preparedPolyData.DeepCopy(normalsFilter.GetOutput())
+        if preparedPolyData.GetNumberOfPoints() <= 0 or preparedPolyData.GetNumberOfCells() <= 0:
+            preparedPolyData.DeepCopy(cleanFilter.GetOutput())
+        if preparedPolyData.GetNumberOfPoints() <= 2 or preparedPolyData.GetNumberOfCells() <= 0:
+            raise RuntimeError(f"{modelRole} polydata has insufficient surface geometry after cleanup.")
+        if not cls._polyDataHasFinitePoints(preparedPolyData):
+            raise RuntimeError(f"{modelRole} polydata has non-finite coordinates after cleanup.")
+        return preparedPolyData
 
     def computeSignedDistanceModel(
         self,
         sourceModelNode: vtkMRMLModelNode,
         targetModelNode: vtkMRMLModelNode,
         outputModelNode: vtkMRMLModelNode,
+        preparedTargetPolyData: vtk.vtkPolyData | None = None,
     ) -> vtkMRMLModelNode:
-        sourcePolyData = self._requireModelPolyData(sourceModelNode, "Source")
-        targetPolyData = self._requireModelPolyData(targetModelNode, "Target")
-
-        distanceFilter = vtk.vtkDistancePolyDataFilter()
-        distanceFilter.SetInputData(0, sourcePolyData)
-        distanceFilter.SetInputData(1, targetPolyData)
-        distanceFilter.SignedDistanceOff()
-        distanceFilter.ComputeSecondDistanceOff()
-        distanceFilter.Update()
-
-        outputPolyData = vtk.vtkPolyData()
-        outputPolyData.DeepCopy(distanceFilter.GetOutput())
-
-        enclosedFilter = vtk.vtkSelectEnclosedPoints()
-        enclosedFilter.SetInputData(outputPolyData)
-        enclosedFilter.SetSurfaceData(targetPolyData)
-        enclosedFilter.SetTolerance(1e-6)
-        enclosedFilter.CheckSurfaceOff()
-        enclosedFilter.Update()
-
-        pointData = outputPolyData.GetPointData()
-        distanceArray = pointData.GetArray("Distance")
-        insideMaskArray = enclosedFilter.GetOutput().GetPointData().GetArray("SelectedPoints")
-
-        signedDistanceArray = None
+        sourcePolyData = self._preparePolyDataForDistanceComputation(
+            self._requireModelPolyData(sourceModelNode, "Source"),
+            "Source",
+            orientNormals=False,
+        )
+        targetPolyData = (
+            preparedTargetPolyData
+            if preparedTargetPolyData is not None
+            else self._preparePolyDataForDistanceComputation(
+                self._requireModelPolyData(targetModelNode, "Target"),
+                "Target",
+                orientNormals=True,
+            )
+        )
         if (
-            distanceArray is not None
-            and insideMaskArray is not None
-            and _data_array_value_count(distanceArray) == outputPolyData.GetNumberOfPoints()
-            and _data_array_value_count(insideMaskArray) == outputPolyData.GetNumberOfPoints()
+            targetPolyData is None
+            or targetPolyData.GetNumberOfPoints() <= 2
+            or targetPolyData.GetNumberOfCells() <= 0
+            or not self._polyDataHasFinitePoints(targetPolyData)
         ):
-            unsignedDistances = np.abs(
-                np.asarray(numpy_support.vtk_to_numpy(distanceArray), dtype=np.float64)
+            raise RuntimeError("Target polydata is invalid for signed-distance computation.")
+
+        if ENABLE_MAM_DEBUG_LOGGING:
+            logging.info(
+                "MAM debug: computeSignedDistanceModel start | source=%s | target=%s | fastPathEnabled=%s",
+                self._polyDataSummaryText(sourcePolyData),
+                self._polyDataSummaryText(targetPolyData),
+                bool(ENABLE_VTK_DISTANCE_FAST_PATH),
             )
-            insideMask = np.asarray(numpy_support.vtk_to_numpy(insideMaskArray), dtype=np.uint8) > 0
-            signedDistances = unsignedDistances.copy()
-            signedDistances[insideMask] *= -1.0
-            signedDistanceArray = numpy_support.numpy_to_vtk(
-                signedDistances,
-                deep=True,
-                array_type=vtk.VTK_DOUBLE,
-            )
-            signedDistanceArray.SetName(SIGNED_DISTANCE_ARRAY_NAME)
-        else:
+
+        outputPolyData = None
+        signedDistances = None
+
+        # Fast path: C++ distance + enclosed-point sign mask.
+        if ENABLE_VTK_DISTANCE_FAST_PATH:
+            try:
+                distanceFilter = vtk.vtkDistancePolyDataFilter()
+                distanceFilter.SetInputData(0, sourcePolyData)
+                distanceFilter.SetInputData(1, targetPolyData)
+                if hasattr(distanceFilter, "SignedDistanceOff"):
+                    distanceFilter.SignedDistanceOff()
+                elif hasattr(distanceFilter, "SetSignedDistance"):
+                    distanceFilter.SetSignedDistance(False)
+                if hasattr(distanceFilter, "ComputeSecondDistanceOff"):
+                    distanceFilter.ComputeSecondDistanceOff()
+                distanceFilter.Update()
+
+                distanceOutput = vtk.vtkPolyData()
+                distanceOutput.DeepCopy(distanceFilter.GetOutput())
+                pointData = distanceOutput.GetPointData()
+                distanceArray = pointData.GetArray("Distance") if pointData else None
+                if distanceArray is None and pointData:
+                    distanceArray = pointData.GetScalars()
+
+                enclosedFilter = vtk.vtkSelectEnclosedPoints()
+                enclosedFilter.SetInputData(distanceOutput)
+                enclosedFilter.SetSurfaceData(targetPolyData)
+                enclosedFilter.SetTolerance(1e-6)
+                if hasattr(enclosedFilter, "CheckSurfaceOff"):
+                    enclosedFilter.CheckSurfaceOff()
+                enclosedFilter.Update()
+                insideMaskArray = enclosedFilter.GetOutput().GetPointData().GetArray("SelectedPoints")
+
+                pointCount = int(distanceOutput.GetNumberOfPoints())
+                if (
+                    distanceArray is not None
+                    and insideMaskArray is not None
+                    and _data_array_value_count(distanceArray) == pointCount
+                    and _data_array_value_count(insideMaskArray) == pointCount
+                ):
+                    unsignedDistances = np.asarray(
+                        numpy_support.vtk_to_numpy(distanceArray),
+                        dtype=np.float64,
+                    )
+                    insideMask = np.asarray(
+                        numpy_support.vtk_to_numpy(insideMaskArray),
+                        dtype=np.uint8,
+                    ) > 0
+                    signedDistances = np.abs(unsignedDistances)
+                    signedDistances[insideMask] *= -1.0
+                    outputPolyData = distanceOutput
+            except Exception:
+                logging.debug("Fast signed-distance path failed; falling back to implicit distance.", exc_info=True)
+
+        if signedDistances is not None and (not np.any(np.isfinite(signedDistances))):
+            signedDistances = None
+            outputPolyData = None
+
+        # Fallback path: robust implicit distance evaluation.
+        if signedDistances is None or outputPolyData is None:
+            if ENABLE_MAM_DEBUG_LOGGING:
+                logging.info("MAM debug: using implicit signed-distance fallback path.")
+            outputPolyData = vtk.vtkPolyData()
+            outputPolyData.DeepCopy(sourcePolyData)
+            points = outputPolyData.GetPoints()
+            if points is None or points.GetData() is None:
+                raise RuntimeError("Source polydata points are unavailable for signed-distance computation.")
+
+            sourcePointsNumpy = np.asarray(numpy_support.vtk_to_numpy(points.GetData()), dtype=np.float64)
+            if sourcePointsNumpy.ndim != 2 or sourcePointsNumpy.shape[0] <= 0 or sourcePointsNumpy.shape[1] < 3:
+                raise RuntimeError("Source polydata point coordinates are invalid for signed-distance computation.")
+
             implicitDistance = vtk.vtkImplicitPolyDataDistance()
             implicitDistance.SetInput(targetPolyData)
-            pointCount = outputPolyData.GetNumberOfPoints()
-            signedDistanceArray = vtk.vtkDoubleArray()
-            signedDistanceArray.SetName(SIGNED_DISTANCE_ARRAY_NAME)
-            signedDistanceArray.SetNumberOfComponents(1)
-            signedDistanceArray.SetNumberOfTuples(pointCount)
-            pointCoordinates = [0.0, 0.0, 0.0]
-            for pointIndex in range(pointCount):
-                outputPolyData.GetPoint(pointIndex, pointCoordinates)
-                unsignedDistance = abs(float(implicitDistance.EvaluateFunction(pointCoordinates)))
-                signedDistance = -unsignedDistance if bool(enclosedFilter.IsInside(pointIndex)) else unsignedDistance
-                signedDistanceArray.SetValue(pointIndex, signedDistance)
 
+            enclosedFilter = vtk.vtkSelectEnclosedPoints()
+            enclosedFilter.SetInputData(outputPolyData)
+            enclosedFilter.SetSurfaceData(targetPolyData)
+            enclosedFilter.SetTolerance(1e-6)
+            if hasattr(enclosedFilter, "CheckSurfaceOff"):
+                enclosedFilter.CheckSurfaceOff()
+            enclosedFilter.Update()
+
+            pointCount = int(sourcePointsNumpy.shape[0])
+            insideMask = np.zeros(pointCount, dtype=bool)
+            insideMaskArray = enclosedFilter.GetOutput().GetPointData().GetArray("SelectedPoints")
+            if (
+                insideMaskArray is not None
+                and _data_array_value_count(insideMaskArray) == pointCount
+            ):
+                insideMask = np.asarray(
+                    numpy_support.vtk_to_numpy(insideMaskArray),
+                    dtype=np.uint8,
+                ) > 0
+            else:
+                # Fall back to API query if the array was not emitted by this VTK build.
+                for pointIndex in range(pointCount):
+                    insideMask[pointIndex] = bool(enclosedFilter.IsInside(pointIndex))
+
+            signedDistances = np.empty(pointCount, dtype=np.float64)
+            for pointIndex in range(pointCount):
+                point = sourcePointsNumpy[pointIndex]
+                unsignedDistance = abs(float(
+                    implicitDistance.EvaluateFunction((float(point[0]), float(point[1]), float(point[2])))
+                ))
+                signedDistances[pointIndex] = -unsignedDistance if insideMask[pointIndex] else unsignedDistance
+
+        finiteMask = np.isfinite(signedDistances)
+        if not np.any(finiteMask):
+            raise RuntimeError("Signed-distance computation produced no finite values.")
+        invalidValueCount = int(np.count_nonzero(~finiteMask))
+        if invalidValueCount > 0:
+            logging.warning(
+                "Signed-distance computation replaced %d non-finite values with 0.0.",
+                invalidValueCount,
+            )
+            signedDistances[~finiteMask] = 0.0
+
+        signedDistanceArray = numpy_support.numpy_to_vtk(
+            signedDistances,
+            deep=True,
+            array_type=vtk.VTK_DOUBLE,
+        )
+        signedDistanceArray.SetName(SIGNED_DISTANCE_ARRAY_NAME)
+
+        pointData = outputPolyData.GetPointData()
+        if pointData is None:
+            raise RuntimeError("Output polydata point data is unavailable for signed-distance results.")
+        if SIGNED_DISTANCE_ARRAY_NAME != "Distance" and pointData.GetArray("Distance"):
+            pointData.RemoveArray("Distance")
         if pointData.GetArray(SIGNED_DISTANCE_ARRAY_NAME):
             pointData.RemoveArray(SIGNED_DISTANCE_ARRAY_NAME)
         pointData.AddArray(signedDistanceArray)
@@ -9734,6 +10134,11 @@ class SurgicalVision3D_PlannerLogic(ScriptedLoadableModuleLogic):
                 if segmentationNode.GetSegmentation().GetSegment(modifierSegmentID):
                     segmentationNode.GetSegmentation().RemoveSegment(modifierSegmentID)
         finally:
+            if segmentEditorWidget and hasattr(segmentEditorWidget, "deleteLater"):
+                try:
+                    segmentEditorWidget.deleteLater()
+                except Exception:
+                    pass
             segmentEditorWidget = None
             if segmentEditorNode and slicer.mrmlScene.IsNodePresent(segmentEditorNode):
                 slicer.mrmlScene.RemoveNode(segmentEditorNode)
@@ -9806,10 +10211,10 @@ class SurgicalVision3D_PlannerTest(ScriptedLoadableModuleTest):
 
     def test_extract_trajectories_from_paired_points(self):
         points = [
-            (0.0, 0.0, -10.0),
             (0.0, 0.0, 0.0),
-            (5.0, 1.0, -4.0),
+            (0.0, 0.0, -10.0),
             (5.0, 1.0, 0.0),
+            (5.0, 1.0, -4.0),
         ]
         trajectories = SurgicalVision3D_PlannerLogic.extractTrajectoriesFromPointPairs(points, strictEven=True)
 
@@ -9823,8 +10228,8 @@ class SurgicalVision3D_PlannerTest(ScriptedLoadableModuleTest):
 
     def test_extract_trajectories_odd_count_handling(self):
         oddPoints = [
-            (0.0, 0.0, -10.0),
             (0.0, 0.0, 0.0),
+            (0.0, 0.0, -10.0),
             (2.0, 2.0, 2.0),
         ]
         with self.assertRaises(ValueError):
@@ -9838,7 +10243,7 @@ class SurgicalVision3D_PlannerTest(ScriptedLoadableModuleTest):
         endpointsNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "endpoints")
         slicer.util.updateMarkupsControlPointsFromArray(
             endpointsNode,
-            np.array([(0.0, 0.0, -15.0), (0.0, 0.0, 0.0)], dtype=float),
+            np.array([(0.0, 0.0, 0.0), (0.0, 0.0, -15.0)], dtype=float),
         )
 
         trajectory = logic.extractSingleTrajectoryFromMarkups(endpointsNode)
@@ -9848,7 +10253,7 @@ class SurgicalVision3D_PlannerTest(ScriptedLoadableModuleTest):
 
         slicer.util.updateMarkupsControlPointsFromArray(
             endpointsNode,
-            np.array([(0.0, 0.0, -15.0), (0.0, 0.0, 0.0), (5.0, 0.0, -5.0), (5.0, 0.0, 0.0)], dtype=float),
+            np.array([(0.0, 0.0, 0.0), (0.0, 0.0, -15.0), (5.0, 0.0, 0.0), (5.0, 0.0, -5.0)], dtype=float),
         )
         with self.assertRaises(ValueError):
             logic.extractSingleTrajectoryFromMarkups(endpointsNode)
@@ -9970,7 +10375,8 @@ class SurgicalVision3D_PlannerTest(ScriptedLoadableModuleTest):
         trajectory = ProbeTrajectory(
             entryPointRAS=(0.0, 0.0, 0.0),
             targetPointRAS=(0.0, 0.0, -20.0),
-            directionVector=(0.0, 0.0, -1.0),
+            # Deliberately opposite direction vector: coaxial planning must use entry/endpoint points.
+            directionVector=(0.0, 0.0, 1.0),
             lengthMm=20.0,
             trajectoryIndex=0,
         )

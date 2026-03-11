@@ -47,7 +47,7 @@ Before clicking planner actions, prepare these nodes:
 - `Reference Probe Segmentation` (`vtkMRMLSegmentationNode`)
   - Must contain at least one valid segment with closed-surface representation.
 - `Endpoints Markups` (`vtkMRMLMarkupsFiducialNode`)
-  - Control points are interpreted in pairs: `endpoint1,entry1,endpoint2,entry2,...`
+  - Control points are interpreted in pairs: `entry1,endpoint1,entry2,endpoint2,...`
   - Use an even number of points for strict pairing.
 - `Tumor Segmentation` (`vtkMRMLSegmentationNode`)
   - Must contain at least one valid segment with closed-surface representation.

@@ -11,7 +11,7 @@ This README is written for both:
 ## What This Project Does
 
 At a high level, the module supports:
-- trajectory planning from entry/target point pairs
+- trajectory planning from entry/endpoint point pairs
 - synthetic probe placement and merged ablation geometry
 - margin, safety, coverage, feasibility, and coordination analysis
 - scenario snapshots and candidate generation/filtering/recommendation
@@ -49,7 +49,7 @@ At a high level, the module supports:
    - Click `Load`.
 6. In **Inputs**, select:
    - reference probe segmentation
-   - endpoints markups (entry/target pairs)
+   - endpoints markups (entry/endpoint pairs)
    - tumor segmentation
 7. Run:
    - `Place Probes`
@@ -62,7 +62,7 @@ At a high level, the module supports:
 - **Reference probe segmentation**:
   A template probe/applicator geometry duplicated and placed along each trajectory.
 - **Endpoints markups**:
-  Ordered points that define trajectories in pairs: `entry1,target1,entry2,target2,...`.
+  Ordered points that define trajectories in pairs: `entry1,endpoint1,entry2,endpoint2,...`.
 - **Working plan**:
   The current active planning state in the scene.
 - **Scenario**:

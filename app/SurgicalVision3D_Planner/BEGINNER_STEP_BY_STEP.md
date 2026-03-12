@@ -75,7 +75,7 @@ Goal after Step 3:
 1. Click `Validate Against Critical Structures`.
 2. Read the status text:
    1. `Trajectory valid` means continue.
-   2. `Trajectory invalid` means move your 2 points in Step 3 and validate again.
+   2. `Trajectory invalid` means move your 2 points in Step 3 or run `Auto-adjust Endpoint`, then validate again.
 
 Goal after Step 4:
 
@@ -132,4 +132,4 @@ If the workflow feels stuck:
 
 ## One-Line Checklist
 
-Import -> Segment -> 2 points (endpoint then entry) -> Validate pass -> Place -> Merge -> Evaluate MAM pass -> Lock -> Compute Coaxial Plan.
+Import -> Segment -> 2 points (entry then endpoint) -> Validate pass -> Place -> Merge -> Evaluate MAM pass -> Lock -> Compute Coaxial Plan.

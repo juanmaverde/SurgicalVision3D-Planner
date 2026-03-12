@@ -29,6 +29,10 @@ Two principles show up throughout the code:
 
 ```text
 .
+|-- INSTRUCTIONS_FOR_USE.md
+|-- QUICK_START.md
+|-- QUICK_USAGE.md
+|-- SOP.md
 |-- app/
 |   |-- CMakeLists.txt
 |   `-- SurgicalVision3D_Planner/
@@ -47,8 +51,6 @@ Two principles show up throughout the code:
 |       |   `-- Reproducibility/
 |       `-- Testing/
 |           `-- Python/
-|-- Legacy/
-|   `-- AblationPlanner/
 |-- LICENSE.md
 |-- RELEASE.md
 |-- SurgicalVision3D_Planner.png
@@ -69,7 +71,10 @@ Two principles show up throughout the code:
 | `app/SurgicalVision3D_Planner/Resources/Cohorts/` | Sample case assets, cohort schema/catalog metadata, and example cohort definition JSON. |
 | `app/SurgicalVision3D_Planner/Resources/Reproducibility/` | Schema/layout/config templates for reproducibility package generation. |
 | `app/SurgicalVision3D_Planner/Testing/Python/` | Dedicated Slicer Python tests for logic behavior and deterministic output rules. |
-| `Legacy/AblationPlanner/` | Historical predecessor kept for migration/reference context; not the active module. |
+| `INSTRUCTIONS_FOR_USE.md` | Detailed operator-focused instructions for loading, running, reviewing, and exporting planning sessions. |
+| `QUICK_START.md` | Short first-run setup guide for loading the extension in Slicer and completing one beginner plan. |
+| `QUICK_USAGE.md` | Short operational guide for the beginner and general planning workflows. |
+| `SOP.md` | Standard operating procedure for repeatable research execution, review, and record-keeping. |
 | `LICENSE.md` | Restricted proprietary no-use license and ownership statement. |
 | `RELEASE.md` | Release checklist, validation expectations, and version/tag guidance. |
 
@@ -465,9 +470,9 @@ Bundled reproducibility assets include:
 
 These resources are copied into generated reproducibility packages where appropriate.
 
-### 6.5 Legacy resources
+### 6.5 Historical migration context
 
-`Legacy/AblationPlanner/` is useful when tracing history or migration intent. It should generally be treated as archival reference, not the main place to implement new work.
+This branch does not include a checked-in `Legacy/` source tree. Historical migration context is instead captured in notes such as `app/SurgicalVision3D_Planner/PHASE1_REFACTOR_NOTES.md`.
 
 ## 7. Key Output Nodes and Tables
 
@@ -637,12 +642,16 @@ These are not accidents. Most of them are tradeoffs in favor of deterministic, r
 For a new developer or reviewer, the most useful reading order is:
 
 1. `README.md`
-2. `app/SurgicalVision3D_Planner/PREREQUISITES.md`
-3. `app/SurgicalVision3D_Planner/BEGINNER_STEP_BY_STEP.md`
-4. `app/SurgicalVision3D_Planner/USAGE_GUIDE.md`
-5. `app/SurgicalVision3D_Planner/SurgicalVision3D_Planner.py`
-6. `app/SurgicalVision3D_Planner/Testing/Python/SurgicalVision3D_PlannerPhase1Test.py`
-7. `app/SurgicalVision3D_Planner/PHASE1_REFACTOR_NOTES.md`
-8. `app/SurgicalVision3D_Planner/MULTI_TRAJECTORY_ARRAY_SPEC.md`
+2. `QUICK_START.md`
+3. `QUICK_USAGE.md`
+4. `INSTRUCTIONS_FOR_USE.md`
+5. `SOP.md`
+6. `app/SurgicalVision3D_Planner/PREREQUISITES.md`
+7. `app/SurgicalVision3D_Planner/BEGINNER_STEP_BY_STEP.md`
+8. `app/SurgicalVision3D_Planner/USAGE_GUIDE.md`
+9. `app/SurgicalVision3D_Planner/SurgicalVision3D_Planner.py`
+10. `app/SurgicalVision3D_Planner/Testing/Python/SurgicalVision3D_PlannerPhase1Test.py`
+11. `app/SurgicalVision3D_Planner/PHASE1_REFACTOR_NOTES.md`
+12. `app/SurgicalVision3D_Planner/MULTI_TRAJECTORY_ARRAY_SPEC.md`
 
 That sequence moves from user-facing behavior to implementation detail to historical design context.

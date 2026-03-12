@@ -1,4 +1,7 @@
+# Local archive or migration scratch space
 Legacy/
+legacy/
+
+# Python bytecode
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]

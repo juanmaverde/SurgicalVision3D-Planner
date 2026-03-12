@@ -24,6 +24,10 @@ git push origin v0.1.0
 
 1. Verify repository docs are current:
    - `README.md`
+   - `INSTRUCTIONS_FOR_USE.md`
+   - `QUICK_START.md`
+   - `QUICK_USAGE.md`
+   - `SOP.md`
    - `DOCUMENTATION.md`
    - `LICENSE.md`
    - user-facing module docs under `app/SurgicalVision3D_Planner/`
